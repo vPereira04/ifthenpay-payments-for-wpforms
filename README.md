@@ -131,12 +131,19 @@ All network requests are performed server-side over HTTPS. Sensitive credentials
 Below are screenshots demonstrating key features and interfaces of the plugin:
 
 1. **(Admin Only) Backoffice Synchronization under WPForms Settings Payments**
+   ![Backoffice Settings](.wordpress-org/screenshot-1.png)
 2. **(Admin Only) WPForms's admin page (Creation/Editing Form -> Payments)**
+   ![Gateway Settings](.wordpress-org/screenshot-2.png)
 3. **(Admin Only) Adding ifthenpay's Payment field to the selected form**
+   ![Adding Field to Form](.wordpress-org/screenshot-3.png)
 4. **(Admin Only) ifthenpay's Payment field Basic configuration options**
+   ![Field Basic Settings](.wordpress-org/screenshot-4.png)
 5. **(Admin Only) ifthenpay's Payment field Advanced configuration options**
+   ![Field Advanced Settings](.wordpress-org/screenshot-5.png)
 6. **(Customers Experience) Payment Gateway field display varies by WPForms settings**
+   ![Display of Field](.wordpress-org/screenshot-6.png)
 7. **(Customers Experience) Payment Modal Window**
+   ![Payment Modal](.wordpress-org/screenshot-7.png)
 
 ## Support
 
