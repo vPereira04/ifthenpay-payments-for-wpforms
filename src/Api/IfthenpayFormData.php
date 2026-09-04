@@ -83,6 +83,10 @@ final class IfthenpayFormData {
 
 			$type = isset( $field['type'] ) ? (string) $field['type'] : '';
 			if ( ! in_array( $type, [ 'email', 'name', 'payment-single', 'payment-multiple', 'payment-checkbox', 'payment-select', 'payment-coupon', 'coupon', 'payment-total' ], true ) ) {
+				$preview = self::build_generic_field_preview( $type, $field, $field_id, $submitted_fields[ $field_id ] ?? '', $currency );
+				if ( $preview !== null ) {
+					$fields[ $field_id ] = $preview;
+				}
 				continue;
 			}
 
@@ -185,7 +189,10 @@ final class IfthenpayFormData {
 				}
 			}
 
-			$amount       *= max( 1, $quantity );
+			// $quantity is already floored at 0 (never negative) by get_submitted_quantity() —
+			// do not re-clamp to a minimum of 1 here, or an explicit zero quantity (see that
+			// method's docblock) would still charge one unit's price.
+			$amount       *= $quantity;
 			$total_amount += $amount;
 
 			$field_data['value']      = $value !== '' ? $value : ( function_exists( 'wpforms_format_amount' ) ? wpforms_format_amount( $amount, true ) : (string) $amount );
@@ -346,6 +353,9 @@ final class IfthenpayFormData {
 			'total'              => IfthenpayPayload::format_amount( $total_amount ),
 			'subtotal'           => IfthenpayPayload::format_amount( $subtotal_amount ),
 			'discount'           => IfthenpayPayload::format_amount( $discount_amount ),
+			'total_amount'       => $total_amount,
+			'subtotal_amount'    => $subtotal_amount,
+			'discount_amount'    => $discount_amount,
 			'type'               => 'one-time',
 			'payment_method'     => $method,
 			'coupon'             => '',
@@ -360,24 +370,92 @@ final class IfthenpayFormData {
 	}
 
 	/**
+	 * Best-effort plain-text preview for a field type this class doesn't otherwise process
+	 * (a plain text/textarea/select/radio/etc. field with no bearing on payment). Feeds
+	 * extract_payment_summary()'s line items — the real WPForms entry itself is only created once
+	 * the payment is confirmed, by replaying the original raw submission (see
+	 * Process::create_entry_for_payment()), independent of this preview.
+	 *
+	 * Deliberately skips field types this can't safely render as plain text: file/signature
+	 * uploads aren't even present in a serialized form payload to begin with, and structural
+	 * types (layout, repeater, HTML/content blocks, dividers, page breaks, CAPTCHAs) either carry
+	 * no answer of their own or need type-specific rendering this preview doesn't attempt.
+	 *
+	 * @param array<string, mixed> $field
+	 * @param int|string           $field_id
+	 * @param mixed                $submitted_value
+	 * @return array<string, mixed>|null
+	 */
+	private static function build_generic_field_preview( string $type, array $field, $field_id, $submitted_value, string $currency ): ?array {
+		static $unsupported_types = [
+			'file-upload', 'signature', 'layout', 'repeater', 'html', 'content',
+			'divider', 'pagebreak', 'captcha', 'hcaptcha', 'recaptcha', 'cloudflare-turnstile',
+			'password', 'entry-preview', 'richtext',
+		];
+
+		if ( $type === '' || in_array( $type, $unsupported_types, true ) ) {
+			return null;
+		}
+
+		$value = is_array( $submitted_value )
+			? implode( ', ', array_map( static fn( $v ): string => sanitize_text_field( (string) $v ), $submitted_value ) )
+			: sanitize_text_field( (string) $submitted_value );
+
+		if ( $value === '' ) {
+			return null;
+		}
+
+		return [
+			'name'     => isset( $field['label'] ) ? sanitize_text_field( (string) $field['label'] ) : sprintf( 'Field #%d', (int) $field_id ),
+			'id'       => absint( (int) $field_id ),
+			'type'     => sanitize_key( $type ),
+			'currency' => $currency,
+			'value'    => $value,
+		];
+	}
+
+	/**
+	 * Mirrors WPForms_Field::is_payment_quantities_enabled() +
+	 * ::get_submitted_field_quantity() exactly (includes/fields/class-base.php) rather than
+	 * reinventing the logic — WPForms core only ever looks at a submitted quantity for a
+	 * field with `enable_quantity` truthy (and, for payment-single, only in its `single`
+	 * format); every other field is always exactly 1 unit, full stop, regardless of
+	 * whatever a `quantities[field_id]` payload entry happens to contain. Trusting that
+	 * entry unconditionally — e.g. for a payment-checkbox field, which never supports
+	 * quantity — is what previously let a stray/empty posted value zero out an otherwise
+	 * correct total ("Amount cannot be lower than 0" on a real, non-zero order).
+	 *
 	 * @param array<string, mixed> $field
 	 * @param array<string, mixed> $quantities
 	 * @param int|string $field_id
 	 * @param array<string, mixed> $form_data
 	 */
 	private static function get_submitted_quantity( array $field, array $quantities, $field_id, array $form_data ): int {
-		$field_id           = (string) $field_id;
-		$submitted_quantity = isset( $quantities[ $field_id ] ) ? (int) $quantities[ $field_id ] : 0;
+		$field_id = (string) $field_id;
 
-		if ( $submitted_quantity <= 0 && isset( $form_data['quantities'][ $field_id ] ) ) {
+		if ( empty( $field['enable_quantity'] ) ) {
+			return 1;
+		}
+
+		if ( ( $field['type'] ?? '' ) === 'payment-single' && ( $field['format'] ?? '' ) !== 'single' ) {
+			return 1;
+		}
+
+		$has_submitted      = array_key_exists( $field_id, $quantities );
+		$submitted_quantity = $has_submitted ? (int) $quantities[ $field_id ] : 0;
+
+		if ( ! $has_submitted && isset( $form_data['quantities'][ $field_id ] ) ) {
 			$submitted_quantity = (int) $form_data['quantities'][ $field_id ];
 		}
 
-		if ( $submitted_quantity <= 0 && isset( $field['min_quantity'] ) ) {
-			$submitted_quantity = (int) $field['min_quantity'];
+		$min_quantity = isset( $field['min_quantity'] ) ? (int) $field['min_quantity'] : 0;
+		$max_quantity = isset( $field['max_quantity'] ) ? (int) $field['max_quantity'] : 10;
+
+		if ( $submitted_quantity >= $min_quantity && $submitted_quantity <= $max_quantity ) {
+			return $submitted_quantity;
 		}
 
-		return max( 1, $submitted_quantity );
+		return $min_quantity;
 	}
 
 	private static function resolve_coupon_discount_amount( string $coupon_code, int $form_id, float $subtotal ): float {

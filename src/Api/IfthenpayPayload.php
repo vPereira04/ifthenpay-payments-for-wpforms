@@ -17,6 +17,9 @@ final class IfthenpayPayload {
 	 * Build pay-by-link payload.
 	 */
 	public static function build_pay_by_link_payload( array $args ): array {
+		// $id doubles as both ifthenpay's tracking reference (see Process::generate_pbl_ref())
+		// and, since it's the only "id" ifthenpay exposes back to the customer, the human-visible
+		// order number shown both in the description below and on ifthenpay's own hosted page.
 		$id          = (string) ( $args['id'] ?? '' );
 		$description = sanitize_text_field( $args['description'] ?? '' );
 
@@ -64,8 +67,14 @@ final class IfthenpayPayload {
 		string $thousands_separator = ''
 	): string {
 		if ( ! is_numeric( $amount ) ) {
-			return (string) $amount;
+			$normalized = self::normalize_api_amount_string( (string) $amount );
+			if ( ! is_numeric( $normalized ) ) {
+				return (string) $amount;
+			}
+			$amount = $normalized;
 		}
+
+		$amount = self::normalize_api_amount_value( $amount );
 
 		return number_format(
 			(float) $amount,
@@ -76,17 +85,116 @@ final class IfthenpayPayload {
 	}
 
 	/**
+	 * Normalize a string amount so locale-formatted values are turned into a valid decimal number.
+	 */
+	private static function normalize_api_amount_string( string $amount ): string {
+		$trimmed = trim( $amount );
+		if ( $trimmed === '' ) {
+			return '0';
+		}
+
+		$trimmed = preg_replace( '/[\x{00A0}\s]+/u', '', $trimmed );
+
+		if ( str_contains( $trimmed, '.' ) && str_contains( $trimmed, ',' ) ) {
+			if ( strrpos( $trimmed, ',' ) > strrpos( $trimmed, '.' ) ) {
+				$trimmed = str_replace( '.', '', $trimmed );
+				$trimmed = str_replace( ',', '.', $trimmed );
+			} else {
+				$trimmed = str_replace( ',', '', $trimmed );
+			}
+		} elseif ( str_contains( $trimmed, ',' ) ) {
+			$trimmed = str_replace( ',', '.', $trimmed );
+		}
+
+		$trimmed = preg_replace( '/[^0-9.+-]/', '', $trimmed );
+
+		if ( $trimmed === '' || ! is_numeric( $trimmed ) ) {
+			return '0';
+		}
+
+		return $trimmed;
+	}
+
+	/**
+	 * Normalize a numeric amount before formatting it for the gateway.
+	 */
+	private static function normalize_api_amount_value( float|int|string $amount ): float {
+		if ( is_string( $amount ) ) {
+			return (float) self::normalize_api_amount_string( $amount );
+		}
+
+		return (float) $amount;
+	}
+
+	/**
+	 * Query params a gateway return URL can carry, from either round: our own tracking
+	 * params (added below) or the ones ifthenpay's hosted page appends itself on the way
+	 * back (id, amount, requestId, sk, brand, pan, lang) — see IfthenpayReturn.php and
+	 * frontend.js's RETURN_PARAM_KEYS. When build_gateway_urls() is called with a $base_url
+	 * derived from wp_get_referer() (see Process::ajax_create_pay_button_payment()), the
+	 * browser may still be sitting on a *previous* payment's unstripped return URL — without
+	 * removing these first, add_query_arg() would carry that stale amount/requestId/etc.
+	 * straight into the *new* payment's success/error/cancel URLs.
+	 */
+	private const RETURN_PARAM_KEYS = [
+		'wpforms_pay',
+		'iftp_payment_id',
+		'iftp_gateway',
+		'id',
+		'amount',
+		'requestId',
+		'sk',
+		'brand',
+		'pan',
+		'lang',
+	];
+
+	/**
 	 * Build gateway return URLs for a reserved WPForms payment ID.
 	 *
 	 * @return array<string, string>
 	 */
 	public static function build_gateway_urls( int $payment_id, string $base_url ): array {
+		$base_url = remove_query_arg( self::RETURN_PARAM_KEYS, $base_url );
+
 		return [
-			'success_url'  => add_query_arg( [ 'wpforms_pay' => 'success', 'iftp_payment_id' => $payment_id, 'transaction_id' => '[TRANSACTIONID]', 'iftp_gateway' => 1 ], $base_url ),
-			'error_url'    => add_query_arg( [ 'wpforms_pay' => 'error',   'iftp_payment_id' => $payment_id, 'transaction_id' => '[TRANSACTIONID]', 'iftp_gateway' => 1 ], $base_url ),
-			'cancel_url'   => add_query_arg( [ 'wpforms_pay' => 'cancel',  'iftp_payment_id' => $payment_id, 'transaction_id' => '[TRANSACTIONID]', 'iftp_gateway' => 1 ], $base_url ),
-			'callback_url' => add_query_arg( [ 'iftp_pbl_callback' => 1 ], home_url( '/' ) ),
+			'success_url'  => add_query_arg( [ 'wpforms_pay' => 'success', 'iftp_payment_id' => $payment_id, 'iftp_gateway' => 1 ], $base_url ),
+			'error_url'    => add_query_arg( [ 'wpforms_pay' => 'error',   'iftp_payment_id' => $payment_id, 'iftp_gateway' => 1 ], $base_url ),
+			'cancel_url'   => add_query_arg( [ 'wpforms_pay' => 'cancel',  'iftp_payment_id' => $payment_id, 'iftp_gateway' => 1 ], $base_url ),
+			'callback_url' => add_query_arg( [ self::CALLBACK_QUERY_VAR => self::callback_path_segment() ], home_url( '/' ) ),
 		];
+	}
+
+	/**
+	 * Query var that marks a request as the ifthenpay merchant-notification webhook.
+	 * A query string on the site root (rather than a bare invented path) is used
+	 * deliberately: it reaches index.php on every WordPress install regardless of the
+	 * active permalink structure, whereas a bare path like "/wpforms_1_0_0" 404s at the
+	 * webserver before WordPress ever boots unless a catch-all rewrite is in place
+	 * (only written by WP when "pretty" permalinks are active).
+	 */
+	public const CALLBACK_QUERY_VAR = 'iftp_wpforms_cb';
+
+	/**
+	 * Value of CALLBACK_QUERY_VAR that identifies this webhook: "wpforms". Kept
+	 * version-free deliberately — an earlier "wpforms_x_y_z" scheme would have needed
+	 * updating (and re-activating with ifthenpay) on every plugin release, which is
+	 * exactly the kind of drift that causes a callback to silently stop matching.
+	 */
+	public static function callback_path_segment(): string {
+
+		return 'wpforms';
+	}
+
+	/**
+	 * Build the webhook activation URL template used to register ifthenpay merchant
+	 * notifications via IfthenpayClient::activate_callback(). ifthenpay substitutes
+	 * the bracketed placeholders when it pushes the callback request.
+	 */
+	public static function build_callback_activation_url( string $callback_url ): string {
+		$separator = strpos( $callback_url, '?' ) !== false ? '&' : '?';
+
+		return $callback_url . $separator . 'ref=[ORDER_ID]&apk=[ANTI_PHISHING_KEY]&val=[AMOUNT]&mtd=[PAYMENT_METHOD]&req=[REQUEST_ID]';
 	}
 
 	/**
@@ -97,13 +205,11 @@ final class IfthenpayPayload {
 	public static function build_pay_by_link_session(
 		int $payment_id,
 		string $redirect_url,
-		string $token,
 		string $return_url
 	): array {
 		return [
 			'payment_id'            => $payment_id,
 			'iframe_url'            => $redirect_url,
-			'modal_token'           => $token,
 			'return_url'            => $return_url,
 		];
 	}
@@ -115,14 +221,9 @@ final class IfthenpayPayload {
 	 */
 	public static function build_payment_status_response(
 		string $status,
-		string $transaction_id = '',
 		string $payment_method = ''
 	): array {
 		$response = [ 'status' => $status ];
-
-		if ( $transaction_id !== '' ) {
-			$response['transaction_id'] = $transaction_id;
-		}
 
 		if ( $payment_method !== '' ) {
 			$response['payment_method'] = $payment_method;

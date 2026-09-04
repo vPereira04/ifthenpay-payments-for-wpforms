@@ -14,6 +14,17 @@ class Field extends \WPForms_Field
 {
     private const PAY_BUTTON_MAX_VISIBLE_LENGTH = 25;
 
+    private const DEFAULT_BOX_SIZE = 'medium';
+
+    /**
+     * @var array<string, string>
+     */
+    private const BOX_SIZE_MAX_WIDTHS = [
+        'small'  => '25%',
+        'medium' => '60%',
+        'large'  => '100%',
+    ];
+
     /**
      * @var array<string, mixed>
      */
@@ -38,7 +49,15 @@ class Field extends \WPForms_Field
         add_filter('wpforms_field_properties_' . $this->type, [$this, 'field_properties'], 5, 3);
         add_filter('wpforms_field_new_required', [$this, 'default_required'], 10, 2);
         add_action('wpforms_builder_enqueues', [$this, 'builder_enqueues']);
-        add_action('enqueue_block_editor_assets', [$this, 'block_editor_enqueues']);
+        // enqueue_block_assets (not enqueue_block_editor_assets): the Gutenberg post editor
+        // renders block content inside its own <iframe> document, and assets registered on
+        // enqueue_block_editor_assets only reliably load in the outer admin document, not
+        // that iframe — leaving the live-rendered payment field there with no border and no
+        // dark-mode logo swap (frontend.js never even loads). enqueue_block_assets is the
+        // hook WordPress documents as iframe-safe, and also fires on the real frontend
+        // (redundant with, but harmless alongside, Plugin::enqueue_frontend_assets()'s own
+        // wp_enqueue_scripts-based enqueue of the same handles).
+        add_action('enqueue_block_assets', [$this, 'block_editor_enqueues']);
         add_filter('wpforms_builder_strings', [$this, 'builder_js_strings'], 10, 2);
         add_filter('wpforms_builder_field_button_attributes', [$this, 'field_button_attributes'], 10, 3);
         add_filter('wpforms_frontend_foot_submit_classes', [$this, 'hide_submit_button_if_field_exists'], 10, 2);
@@ -124,6 +143,18 @@ class Field extends \WPForms_Field
             IFTP_PBL_URL . 'assets/css/frontend.css',
             [],
             IFTP_PBL_VERSION
+        );
+
+        // Same handle Plugin::enqueue_frontend_assets() registers on the real frontend — the
+        // dark-mode logo switcher at the bottom of frontend.js only runs where this actually
+        // loads, which previously wasn't inside the block editor's iframe at all (see the
+        // enqueue_block_assets note above).
+        wp_enqueue_script(
+            'ifthenpay-wpforms-frontend',
+            IFTP_PBL_URL . 'assets/js/frontend.js',
+            ['jquery'],
+            IFTP_PBL_VERSION,
+            true
         );
     }
 
@@ -244,6 +275,19 @@ class Field extends \WPForms_Field
 
         $this->field_option('advanced-options', $field, ['markup' => 'open']);
 
+        $this->render_select_option(
+            $field,
+            'public_box_size',
+            __('Box size', 'ifthenpay-payments-for-wpforms'),
+            isset($field['public_box_size']) ? (string) $field['public_box_size'] : self::DEFAULT_BOX_SIZE,
+            [
+                'small'  => __('Small', 'ifthenpay-payments-for-wpforms'),
+                'medium' => __('Medium', 'ifthenpay-payments-for-wpforms'),
+                'large'  => __('Large', 'ifthenpay-payments-for-wpforms'),
+            ],
+            __('Choose how wide the ifthenpay payment box appears.', 'ifthenpay-payments-for-wpforms')
+        );
+
         $this->render_text_option(
             $field,
             'public_box_css_classes',
@@ -268,6 +312,22 @@ class Field extends \WPForms_Field
             __('Hide WPForms label', 'ifthenpay-payments-for-wpforms'),
             isset($field['label_hide']) && (string) $field['label_hide'] === '1',
             __('Hide the normal WPForms field label on the frontend.', 'ifthenpay-payments-for-wpforms')
+        );
+
+        $this->render_toggle_option(
+            $field,
+            'hide_logo',
+            __('Hide ifthenpay logo', 'ifthenpay-payments-for-wpforms'),
+            isset($field['hide_logo']) && (string) $field['hide_logo'] === '1',
+            __('Hide the ifthenpay logo shown in the payment box.', 'ifthenpay-payments-for-wpforms')
+        );
+
+        $this->render_toggle_option(
+            $field,
+            'hide_public_box',
+            __('Show pay button only', 'ifthenpay-payments-for-wpforms'),
+            isset($field['hide_public_box']) && (string) $field['hide_public_box'] === '1',
+            __('Hide the payment methods box and show only the Pay now button.', 'ifthenpay-payments-for-wpforms')
         );
 
         $this->field_option('advanced-options', $field, ['markup' => 'close']);
@@ -303,6 +363,37 @@ class Field extends \WPForms_Field
         }
 
         $output .= $this->field_element('text', $field, $atts, false);
+
+        $this->render_field_option_row($field, $slug, $output);
+    }
+
+    /**
+     * @param array<string, mixed> $field
+     * @param array<string, string> $options
+     */
+    private function render_select_option(array $field, string $slug, string $label, string $value, array $options, string $tooltip = ''): void
+    {
+        $output = $this->field_element(
+            'label',
+            $field,
+            [
+                'slug' => $slug,
+                'value' => $label,
+                'tooltip' => $tooltip,
+            ],
+            false
+        );
+
+        $output .= $this->field_element(
+            'select',
+            $field,
+            [
+                'slug' => $slug,
+                'value' => $value,
+                'options' => $options,
+            ],
+            false
+        );
 
         $this->render_field_option_row($field, $slug, $output);
     }
@@ -420,61 +511,51 @@ class Field extends \WPForms_Field
 
         $formData = is_array($formData) ? $formData : [];
         $availability = $this->get_frontend_field_availability($formData);
-        $config = $availability['config'];
-        $enabled = !empty($availability['enabled']);
         $gatewayKey = (string) $availability['gateway_key'];
         $payNowLabel = !empty($field['pay_now_label']) ? (string) $field['pay_now_label'] : __('Pay now', 'ifthenpay-payments-for-wpforms');
-        $hideWpformsLabel = isset($field['label_hide']) && (string) $field['label_hide'] === '1';
         $publicBoxClasses = $this->sanitize_custom_class_list(isset($field['public_box_css_classes']) ? (string) $field['public_box_css_classes'] : '');
         $publicButtonClasses = $this->sanitize_custom_class_list(isset($field['public_button_css_classes']) ? (string) $field['public_button_css_classes'] : '');
+        $boxMaxWidth = $this->get_box_max_width(isset($field['public_box_size']) ? (string) $field['public_box_size'] : self::DEFAULT_BOX_SIZE);
         $defaultMethod = (string) ($availability['default_method'] ?? '');
         $enabledMethods = is_array($availability['enabled_methods']) ? $availability['enabled_methods'] : [];
         $labelPresentation = $this->get_pay_button_presentation($payNowLabel);
-        $buttonInlineStyle = '--iftp-pay-button-font-size:' . esc_attr($labelPresentation['font_size']) . ';--iftp-pay-button-letter-spacing:' . esc_attr($labelPresentation['letter_spacing']) . ';';
+        $hideLogo = isset($field['hide_logo']) && (string) $field['hide_logo'] === '1';
+        $hidePublicBox = isset($field['hide_public_box']) && (string) $field['hide_public_box'] === '1';
 
-        $labelClass = 'wpforms-field-label' . ($hideWpformsLabel ? ' wpforms-label-hide' : '');
         $boxClass = trim('iftp-pbl-public-box iftp-pbl-field-block-section ' . $publicBoxClasses);
         $buttonClass = trim('iftp-pbl-pay-now-button iftp-pbl-public-button ' . $publicButtonClasses);
 
-        echo '<div class="wpforms-field wpforms-field-' . esc_attr($this->type) . ' iftp-pbl-live-field" data-iftp-config-ready="' . esc_attr(!empty($availability['is_ready']) ? '1' : '0') . '" data-iftp-disabled-reason="' . esc_attr((string) $availability['message']) . '" style="margin:16px 0;">';
+        $wrapperClass = 'wpforms-field wpforms-field-' . esc_attr($this->type) . ' iftp-pbl-live-field' . ($hidePublicBox ? ' iftp-pbl-box-hidden' : '');
+        $wrapperStyle = $hidePublicBox ? 'padding:15px 0 0;margin:0;' : 'margin:16px 0 0;';
+
+        echo '<div class="' . $wrapperClass . '" data-iftp-config-ready="' . esc_attr(!empty($availability['is_ready']) ? '1' : '0') . '" data-iftp-disabled-reason="' . esc_attr((string) $availability['message']) . '" style="' . esc_attr($wrapperStyle) . '">';
         echo '<input type="hidden" class="iftp-pbl-payment-id-input" name="iftp_pbl_payment_id" value="">';
-        echo '<input type="hidden" class="iftp-pbl-transaction-id-input" name="iftp_pbl_transaction_id" value="">';
-        echo '<input type="hidden" class="iftp-pbl-payment-session-input" name="iftp_pbl_payment_session_token" value="">';
-        echo '<input type="hidden" class="iftp-pbl-paid-now-clicked-input" name="iftp_pbl_paid_now_clicked" value="0">';
         echo '<input type="hidden" class="iftp-pbl-paid-now-return-input" name="iftp_pbl_paid_now_return" value="">';
         echo '<input type="hidden" class="iftp-pbl-nonce-input" name="iftp_pbl_nonce" value="' . esc_attr(wp_create_nonce('iftp_pbl_frontend')) . '">';
 
         echo '<div class="iftp-pbl-field-shell">';
-        echo '<div class="' . esc_attr($boxClass) . '" style="max-width:60%;font-family:inherit;text-align:left;box-sizing:border-box;padding:12px;">';
 
-        echo '<div class="" style="display:flex;align-items:center;margin-bottom:8px;">';
-        echo '<span title="' . esc_attr__('Ifthenpay | Payment Gateway', 'ifthenpay-payments-for-wpforms') . '" class="iftp-pbl-header-icon" aria-hidden="true"><img src="' . esc_url(IFTP_PBL_URL . 'assets/images/mini_icon.svg') . '" data-logo-dark="' . esc_attr(IFTP_PBL_URL . 'assets/images/miniw_icon.svg') . '" alt=""></span>';
-        echo '<div>';
-        echo '<div class="iftp-pbl-header-title" style="margin-left:10px;font-weight:600;color:#333;font-size:14px;">Ifthenpay</div>';
-        echo '<div class="iftp-pbl-header-subtitle" style="margin-left:10px;font-size:12px;color:#666;">Payment Gateway</div>';
-        echo '</div>';
-        echo '</div>';
+        if (!$hidePublicBox) {
+            echo '<div class="' . esc_attr($boxClass) . '" style="max-width:' . esc_attr($boxMaxWidth) . ';font-family:inherit;text-align:left;box-sizing:border-box;padding:12px;">';
 
-        $this->render_enabled_methods_section($enabledMethods, $defaultMethod, $this->get_catalog_keyed_by_entity((int) ($formData['id'] ?? 0)));
+            echo '<div class="iftp-pbl-header-row" style="display:flex;align-items:center;">';
+            if (!$hideLogo) {
+                echo '<img class="iftp-pbl-header-icon" style="width:30px;height:28px;margin-right:20px;flex:none;" src="' . esc_url(IFTP_PBL_URL . 'assets/images/mini_icon.svg') . '" data-logo-dark="' . esc_url(IFTP_PBL_URL . 'assets/images/icon-white.svg') . '" alt="' . esc_attr__('Ifthenpay', 'ifthenpay-payments-for-wpforms') . '">';
+            }
 
-        echo '<div class="iftp-pbl-info" style="margin-top:8px;padding-top:12px;font-size:12px;color:#666;margin-bottom:5px;padding:10px;">';
-        echo '<div style="margin-bottom:4px;"><strong>' . esc_html__('How it works:', 'ifthenpay-payments-for-wpforms') . '</strong></div>';
-        echo '<ul style="margin:4px 0;padding-left:16px;">';
-        /* translators: %s: Pay now button label */
-        echo '<li>' . sprintf(esc_html__('Click "%s" to open the payment window.', 'ifthenpay-payments-for-wpforms'), '<strong>' . esc_html($labelPresentation['display']) . '</strong>') . '</li>';
-        echo '<li>' . esc_html__('Closing the payment window or refreshing it will cancel the payment request.', 'ifthenpay-payments-for-wpforms') . '</li>';
-        echo '<li>' . esc_html__('Ifthenpay only accepts EUR as the chosen currency.', 'ifthenpay-payments-for-wpforms') . '</li>';
-        echo '</ul>';
-        echo '</div>';
-		echo '</div>';
+            $this->render_enabled_methods_section($enabledMethods, $defaultMethod, $this->get_catalog_keyed_by_entity((int) ($formData['id'] ?? 0)));
 
-        echo '<div style="margin-top:30px;">';
+            echo '</div>';
+
+            echo '</div>';
+        }
+
+        echo '<div style="' . ($hidePublicBox ? '' : 'margin-top:30px;') . '">';
         echo '<button class="' . esc_attr($buttonClass) . '" data-gateway-key="' . esc_attr($gatewayKey) . '" title="' . esc_attr($labelPresentation['full']) . '">' . esc_html($labelPresentation['display']) . '</button>';
         echo '</div>';
         echo '</div>';
 
-		echo '<div class="iftp-pbl-runtime-warning" style="display:none;margin-top:10px;max-width:60%;"></div>';
-        echo '<div class="iftp-pbl-conflict-warning" style="display:none;margin-top:10px;max-width:60%;"></div>';
+		echo '<div class="iftp-pbl-runtime-warning" style="display:none;margin-top:10px;max-width:' . esc_attr($boxMaxWidth) . ';"></div>';
         echo '</div>';
     }
 
@@ -552,10 +633,14 @@ class Field extends \WPForms_Field
             return;
         }
 
-        echo '<div class="iftp-pbl-methods-row">';
-        echo '<div class="iftp-pbl-methods-section" style="font-size:12px;color:#666;padding:5px;">';
-        echo '<div class="iftp-pbl-methods-section-title" style="font-size:12px;font-weight:600;color:#4b5563;margin-bottom:8px;">' . esc_html__('Payment methods:', 'ifthenpay-payments-for-wpforms') . '</div>';
-        echo '<div class="iftp-pbl-preview-methods" style="display:flex;flex-wrap:wrap;gap:10px;">';
+        echo '<span class="iftp-pbl-header-divider" aria-hidden="true"></span>';
+        // Inline, not just the iftp-pbl-preview-methods class: this markup also renders
+        // inside the Gutenberg block editor's post-content iframe (a separate document from
+        // the admin page), where a plugin stylesheet enqueued via enqueue_block_editor_assets
+        // doesn't reliably load. Without this flex rule applying, each method-item span below
+        // (itself display:flex, i.e. block-level) stacks vertically instead of laying out in
+        // a row.
+        echo '<div class="iftp-pbl-methods-section iftp-pbl-preview-methods" style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;">';
 
         foreach ($enabledMethods as $entity) {
             $meta        = $catalog[$entity] ?? ['entity' => $entity, 'label' => $entity, 'logo' => '', 'logo_dark' => ''];
@@ -563,25 +648,33 @@ class Field extends \WPForms_Field
             $logoUrl     = (string) $meta['logo'];
             $logoDarkUrl = (string) ($meta['logo_dark'] ?? '');
             $isDefault   = $defaultMethod !== '' && $defaultMethod === $entity;
-            $width       = $entity === 'CCARD' ? '85px' : '45px';
-            $itemStyle   = 'display:flex;flex-direction:column;align-items:center;gap:6px;min-width:' . $width . ';';
-            $logoStyle   = 'border-radius:4px;display:flex;align-items:center;justify-content:center;width:' . $width . ';height:32px;box-sizing:border-box;font-size:9px;font-weight:700;';
+            // CCARD's light and dark-mode logo assets have wildly different native pixel
+            // widths (light ~85px, dark ~400px, both roughly the same aspect ratio at that
+            // width) — no single fixed container width fits both without squeezing one of
+            // them out of proportion. Sizing by height only and letting width follow the
+            // image's own aspect ratio (auto) makes each variant render at its own correct
+            // width instead.
+            $isCard      = $entity === 'CCARD';
+            $widthCss    = $isCard ? 'width:auto;' : 'width:30px;';
+            $logoStyle   = 'display:flex;align-items:center;justify-content:center;' . $widthCss . 'height:25px;box-sizing:border-box;';
+            // Non-card icons still need max-width to stay inside their fixed 30px box; CCARD's
+            // box is auto-width (sized to the image itself), so a max-width there would just
+            // constrain the image against its own natural size — leave it unset. CCARD is also
+            // capped a touch shorter than the other 25px icons (20px) — at the full 25px it
+            // reads oversized next to them.
+            $imgStyle    = $isCard ? 'max-height:20px;object-fit:contain;' : 'max-width:100%;max-height:25px;object-fit:contain;';
 
-            echo '<span class="iftp-pbl-method-item' . ($isDefault ? ' is-default' : '') . '" data-entity="' . esc_attr($entity) . '" style="' . esc_attr($itemStyle) . '">';
-            echo '<span class="' . esc_attr(sanitize_html_class($entity)) . '" style="' . esc_attr($logoStyle) . '">';
+            echo '<span class="iftp-pbl-method-item' . ($isDefault ? ' is-default' : '') . '" data-entity="' . esc_attr($entity) . '" style="' . esc_attr($logoStyle) . '">';
             if ($logoUrl !== '') {
                 echo '<img src="' . esc_url($logoUrl) . '"'
                     . ( $logoDarkUrl !== '' ? ' data-logo-dark="' . esc_attr($logoDarkUrl) . '"' : '' )
-                    . ' alt="' . esc_attr($methodName) . '" title="' . esc_attr($methodName) . '" style="max-width:100%;max-height:32px;object-fit:contain;">';
+                    . ' alt="' . esc_attr($methodName) . '" title="' . esc_attr($methodName) . '" style="' . esc_attr($imgStyle) . '">';
             } else {
                 echo esc_html($methodName);
             }
             echo '</span>';
-            echo '</span>';
         }
 
-        echo '</div>';
-        echo '</div>';
         echo '</div>';
     }
 
@@ -633,6 +726,11 @@ class Field extends \WPForms_Field
         }
 
         return $catalog;
+    }
+
+    private function get_box_max_width(string $size): string
+    {
+        return self::BOX_SIZE_MAX_WIDTHS[$size] ?? self::BOX_SIZE_MAX_WIDTHS[self::DEFAULT_BOX_SIZE];
     }
 
     /**
@@ -733,29 +831,27 @@ class Field extends \WPForms_Field
         $defaultMethod = (string) ($availability['default_method'] ?? '');
         $enabledMethods = is_array($availability['enabled_methods']) ? $availability['enabled_methods'] : [];
         $labelPresentation = $this->get_pay_button_presentation($payNowLabel);
+        $boxMaxWidth = $this->get_box_max_width(isset($field['public_box_size']) ? (string) $field['public_box_size'] : self::DEFAULT_BOX_SIZE);
+        $hideLogo = isset($field['hide_logo']) && (string) $field['hide_logo'] === '1';
+        $hidePublicBox = isset($field['hide_public_box']) && (string) $field['hide_public_box'] === '1';
 
         echo '<div class="iftp-pbl-preview-container" style="margin:16px 0;">';
-        echo '<div class="iftp-pbl-public-box iftp-pbl-field-block-section " style="max-width:60%;font-family:inherit;text-align:left;box-sizing:border-box;padding:12px;border: 1px solid #cccccc !important;border-radius: 4px!important;background-color:#fff !important;">';
 
-        echo '<div class="" style="display:flex;align-items:center;margin-bottom:8px;">';
-        echo '<span title="' . esc_attr__('Ifthenpay | Payment Gateway', 'ifthenpay-payments-for-wpforms') . '" class="iftp-pbl-header-icon" aria-hidden="true"><img src="' . esc_url(IFTP_PBL_URL . 'assets/images/mini_icon.svg') . '" alt=""></span>';
-        echo '<div>';
-        echo '<div style="margin-left:10px;font-weight:600;color:#333;font-size:14px;">Ifthenpay</div>';
-        echo '<div style="margin-left:10px;font-size:12px;color:#666;">Payment Gateway</div>';
-        echo '</div>';
-        echo '</div>';
+        if (!$hidePublicBox) {
+            echo '<div class="iftp-pbl-public-box iftp-pbl-field-block-section " style="max-width:' . esc_attr($boxMaxWidth) . ';font-family:inherit;text-align:left;box-sizing:border-box;padding:2px;border: 1px solid #cccccc !important;border-radius: 4px!important;background-color:#fff !important;">';
 
-        $this->render_enabled_methods_section($enabledMethods, $defaultMethod, $this->get_catalog_keyed_by_entity((int) ($this->formData['id'] ?? 0)));
+            echo '<div class="iftp-pbl-header-row" style="display:flex;align-items:center;">';
+            if (!$hideLogo) {
+                echo '<img class="iftp-pbl-header-icon" style="width:30px;height:28px;margin-right:20px;flex:none;" src="' . esc_url(IFTP_PBL_URL . 'assets/images/mini_icon.svg') . '" alt="' . esc_attr__('Ifthenpay', 'ifthenpay-payments-for-wpforms') . '">';
+            }
 
-    	echo '<div style="margin-bottom:4px;font-size:12px;color:#666;padding-left:10px;"><strong>' . esc_html__('How it works:', 'ifthenpay-payments-for-wpforms') . '</strong></div>';
-		echo '<ul style="margin:4px 0;padding-left:20px;list-style:disc outside;">';
-		/* translators: %s: Pay now button label */
-		echo '<li style="display:list-item;font-size:12px;color:#666;padding-left:10px;">' . sprintf(esc_html__('Click "%s" to open the payment window.', 'ifthenpay-payments-for-wpforms'), '<strong>' . esc_html($labelPresentation['display']) . '</strong>') . '</li>';
-		echo '<li style="display:list-item;font-size:12px;color:#666;padding-left:10px;">' . esc_html__('Closing the payment window or refreshing it will cancel the payment request.', 'ifthenpay-payments-for-wpforms') . '</li>';
-		echo '<li style="display:list-item;font-size:12px;color:#666;padding-left:10px;">' . esc_html__('Ifthenpay only accepts EUR as the chosen currency.', 'ifthenpay-payments-for-wpforms') . '</li>';
-		echo '</ul>';
-		echo '</div>';
-        echo '<div style="margin-top:20px;">';
+            $this->render_enabled_methods_section($enabledMethods, $defaultMethod, $this->get_catalog_keyed_by_entity((int) ($this->formData['id'] ?? 0)));
+
+            echo '</div>';
+            echo '</div>';
+        }
+
+        echo '<div style="' . ($hidePublicBox ? '' : 'margin-top:20px;') . '">';
         echo '<button class="iftp-pbl-pay-now-example-button" style="background:#999c9e;border:none;border-radius:4px;color:#ffffff;cursor:pointer;font-size:17px;font-weight:600;line-height:21px;padding:10px 15px;" title="' . esc_attr($labelPresentation['full']) . '" disabled>' . esc_html($labelPresentation['display']) . '</button>';
         echo '</div>';
         echo '</div>';

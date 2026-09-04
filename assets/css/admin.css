@@ -8,47 +8,51 @@
     --iftp-warn-text-dk: color-mix(in srgb, var(--iftp-warn-base) 55%, black);
 }
 
-.iftp-settings-card {
-  background: #fff;
-  border: 1px solid #dcdcde;
-  border-radius: 4px;
-  padding: 16px;
+/*
+ * The Add New Form templates screen (templates/builder/templates-item.php in WPForms
+ * core) hardcodes which icon goes inside .wpforms-template-thumbnail-placeholder — it's
+ * one of three fixed choices (blank / user-template / generic "wpforms" icon) with no
+ * filter to swap in a third-party plugin's own icon. `content: url(...)` replaces the
+ * rendered image in place, so it keeps the placeholder's existing sizing/centering
+ * instead of us having to reproduce it.
+ */
+#wpforms-template-ifthenpay-example-form-template .wpforms-template-thumbnail-placeholder img,
+#wpforms-template-ifthenpay-complex-form-template .wpforms-template-thumbnail-placeholder img {
+  content: url(../images/icon_templates.svg);
 }
 
-.iftp-settings-card strong {
-  display: block;
-  margin-bottom: 6px;
+/*
+ * Brand accent for our own two template cards on the Add New Form screen — matches the
+ * specificity WPForms itself uses for its own #wpforms-template-generate (AI) card, so
+ * these win over the shared #wpforms-setup-templates-list .wpforms-template defaults
+ * (background #F5F9FD, hover/selected box-shadow) without needing !important.
+ */
+#wpforms-setup-templates-list .wpforms-template#wpforms-template-ifthenpay-example-form-template .wpforms-template-thumbnail,
+#wpforms-setup-templates-list .wpforms-template#wpforms-template-ifthenpay-complex-form-template .wpforms-template-thumbnail {
+  background-color: #e4f3fc;
 }
 
-.iftp-settings-status-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
+#wpforms-setup-templates-list .wpforms-template#wpforms-template-ifthenpay-example-form-template:hover,
+#wpforms-setup-templates-list .wpforms-template#wpforms-template-ifthenpay-example-form-template.selected,
+#wpforms-setup-templates-list .wpforms-template#wpforms-template-ifthenpay-complex-form-template:hover,
+#wpforms-setup-templates-list .wpforms-template#wpforms-template-ifthenpay-complex-form-template.selected {
+  box-shadow: 0 0 0 2px #00609c, 0 3px 4px rgba(0, 0, 0, 0.15);
 }
 
-.iftp-status-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
+#wpforms-template-ifthenpay-example-form-template .wpforms-template-select,
+#wpforms-template-ifthenpay-complex-form-template .wpforms-template-select {
+  background-color: #00609c;
+  border-color: #00609c;
 }
 
-.iftp-status-pill.is-connected {
-  background: #edf7ed;
-  color: #156c2f;
-}
-
-.iftp-status-pill.is-disconnected {
-  background: #fff4e5;
-  color: #8a4b00;
-}
-
-.iftp-status-pill.is-error {
-  background: var(--iftp-warn-bg);
-  color: var(--iftp-warn-title);
+#wpforms-template-ifthenpay-example-form-template .wpforms-template-select:hover,
+#wpforms-template-ifthenpay-example-form-template .wpforms-template-select:active,
+#wpforms-template-ifthenpay-example-form-template .wpforms-template-select:focus,
+#wpforms-template-ifthenpay-complex-form-template .wpforms-template-select:hover,
+#wpforms-template-ifthenpay-complex-form-template .wpforms-template-select:active,
+#wpforms-template-ifthenpay-complex-form-template .wpforms-template-select:focus {
+  background-color: #004d7d;
+  border-color: #004d7d;
 }
 
 .iftp-pbl-methods-table {
@@ -108,19 +112,89 @@
   color: #646970;
 }
 
-.iftp-method-toggle {
+.iftp-method-toggle,
+.iftp-method-toggle-th {
   text-align: center;
-  width: 72px;
+  width: 1%;
+  white-space: nowrap;
+}
+
+.iftp-method-default,
+.iftp-method-default-th {
+  text-align: center !important;
+  width: 1%;
+  white-space: nowrap;
+}
+
+.iftp-pbl-default-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.iftp-pbl-default-star {
+  display: inline-block;
+  font-size: 20px;
+  line-height: 1;
+  color: #c3c4c7;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease;
+}
+
+.iftp-pbl-default-radio:checked + .iftp-pbl-default-star {
+  color: #f0b849;
+}
+
+.iftp-pbl-default-radio:disabled + .iftp-pbl-default-star {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.iftp-pbl-default-star--hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.iftp-pbl-default-star--wink {
+  animation: iftp-pbl-star-wink 0.4s ease;
+}
+
+@keyframes iftp-pbl-star-wink {
+  0% {
+    transform: scale(1) rotate(0deg);
+  }
+
+  40% {
+    transform: scale(1.35) rotate(-18deg);
+  }
+
+  70% {
+    transform: scale(1.1) rotate(8deg);
+  }
+
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
 }
 
 .iftp-method-logo-cell {
   width: 100px;
-  text-align: center;
+  text-align: center !important;
 }
 
 .iftp-method-account input {
   width: 100%;
   max-width: 100%;
+  opacity: 0.8 !important;
+  border-color: transparent!important;
+  background: transparent!important;
 }
 
 .iftp-pbl-account-input[readonly] {
@@ -132,11 +206,12 @@
 
 .iftp-method-logo {
   border: none !important;
-  height: 32px;
+  height: 25px;
   width: auto;
   max-width: 80px;
   object-fit: contain;
   display: block;
+  margin: 0 auto;
 }
 
 .iftp-pbl-no-accounts {

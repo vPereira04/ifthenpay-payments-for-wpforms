@@ -122,8 +122,6 @@
 		);
 	}
 
-	function syncSelectedGatewayLabel() {}
-
 	function getBuilderFormId() {
 		try {
 			const params = new URLSearchParams(window.location.search || '');
@@ -137,7 +135,7 @@
 
 	function loadGatewayMethods(gatewayKey) {
 		if (!panel.ajaxUrl || !panel.gatewayMethodsNonce || !gatewayKey) {
-			syncDefaultPaymentMethods();
+			syncDefaultMethodStars();
 			scheduleRequirementsSync();
 			return;
 		}
@@ -189,8 +187,7 @@
 						$defaultConfig.replaceWith(response.data.default_html);
 					}
 
-					syncSelectedGatewayLabel();
-					syncDefaultPaymentMethods();
+					syncDefaultMethodStars();
 					scheduleRequirementsSync();
 					return;
 				}
@@ -226,36 +223,26 @@
 			});
 	}
 
-	function syncDefaultPaymentMethods() {
-		const select = $('#iftp_pbl_default_method');
-		if (!select.length) {
-			return;
-		}
-
-		const selected = select.val() || '';
-		const autoText =
-			select.find('option[value=""]').first().text() || 'Default (Auto)';
-
-		const $methodOptions = $('.iftp-pbl-method-enabled:checked').map(
-			function () {
-				const entity = String($(this).data('entity') || '');
-				const label = String($(this).data('label') || entity);
-				return entity
-					? $('<option>', { value: entity, text: label })[0]
-					: null;
+	function syncDefaultMethodStars() {
+		$('.iftp-pbl-method-row').each(function () {
+			const $row = $(this);
+			const $enableCheckbox = $row.find('.iftp-pbl-method-enabled');
+			const $star = $row.find('.iftp-pbl-default-radio');
+			if (!$enableCheckbox.length || !$star.length) {
+				return;
 			}
-		);
 
-		select
-			.empty()
-			.append($('<option>', { value: '', text: autoText }))
-			.append($methodOptions);
+			const isEnabled = $enableCheckbox.is(':checked');
 
-		select.val(
-			$methodOptions.filter((_, el) => $(el).val() === selected).length
-				? selected
-				: ''
-		);
+			$star.prop('disabled', !isEnabled);
+			$row
+				.find('.iftp-pbl-default-star')
+				.toggleClass('iftp-pbl-default-star--hidden', !isEnabled);
+
+			if (!isEnabled && $star.is(':checked')) {
+				$star.prop('checked', false);
+			}
+		});
 	}
 
 	function syncPaymentRequirements() {
@@ -296,7 +283,7 @@
 		requirementsSyncTimer = window.setTimeout(function () {
 			syncPaymentRequirements();
 			syncConfigVisibility();
-			syncDefaultPaymentMethods();
+			syncDefaultMethodStars();
 			syncFieldAlert();
 		}, 60);
 	}
@@ -442,9 +429,8 @@
 	}
 
 	$(function () {
-		syncSelectedGatewayLabel();
 		syncConfigVisibility();
-		syncDefaultPaymentMethods();
+		syncDefaultMethodStars();
 		syncFieldAlert();
 
 		$(document).on(
@@ -464,8 +450,29 @@
 			}
 		);
 
+		$(document).on(
+			'change',
+			'select[name^="fields["][name$="[public_box_size]"]',
+			function () {
+				const BOX_MAX_WIDTHS = {
+					small: '25%',
+					medium: '60%',
+					large: '100%',
+				};
+
+				const fieldId = $(this)
+					.closest('.wpforms-field-option-row')
+					.data('field-id');
+				const size = String($(this).val() || 'medium');
+				const maxWidth = BOX_MAX_WIDTHS[size] || BOX_MAX_WIDTHS.medium;
+
+				$('#wpforms-field-' + fieldId)
+					.find('.iftp-pbl-public-box.iftp-pbl-field-block-section')
+					.css('max-width', maxWidth);
+			}
+		);
+
 		$(document).on('change', '#iftp_pbl_gateway_key', function () {
-			syncSelectedGatewayLabel();
 			loadGatewayMethods(String($(this).val() || '').trim());
 			scheduleRequirementsSync();
 		});
@@ -473,8 +480,25 @@
 		$(document).on(
 			'change',
 			'.iftp-pbl-method-enabled',
-			syncDefaultPaymentMethods
+			syncDefaultMethodStars
 		);
+
+		$(document).on('change', '.iftp-pbl-default-radio', function () {
+			if (!$(this).is(':checked')) {
+				return;
+			}
+
+			const $star = $(this)
+				.closest('.iftp-method-default')
+				.find('.iftp-pbl-default-star');
+
+			$star.removeClass('iftp-pbl-default-star--wink');
+			void $star.get(0)?.offsetWidth;
+			$star.addClass('iftp-pbl-default-star--wink');
+			window.setTimeout(function () {
+				$star.removeClass('iftp-pbl-default-star--wink');
+			}, 400);
+		});
 
 		$(document).on('click', '.iftp-pbl-activate-method', function (event) {
 			event.preventDefault();
@@ -490,7 +514,11 @@
 			interceptFieldAddWarnings
 		);
 
-		$(document).on(
+		// WPForms itself triggers these on #wpforms-builder specifically (see its own
+		// first-party Stripe/Square integrations), not on document — bind there directly
+		// rather than relying on bubbling, so a freshly added/removed/reordered field is
+		// picked up immediately without needing a page refresh.
+		$('#wpforms-builder').on(
 			'wpformsFieldAdd wpformsFieldDelete wpformsFieldMove wpformsFieldUpdate',
 			scheduleRequirementsSync
 		);

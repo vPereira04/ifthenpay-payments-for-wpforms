@@ -12,39 +12,12 @@ use RuntimeException;
 
 final class IfthenpayClient {
 
-	private const API_BASE    = 'https://api.ifthenpay.com';
-	private const MOBILE_BASE = 'https://ifthenpay.com/IfmbWS/ifthenpaymobile.asmx';
+	private const API_BASE = 'https://api.ifthenpay.com';
 
 	private string $backoffice_key;
 
 	public function __construct(string $backoffice_key) {
 		$this->backoffice_key = sanitize_text_field($backoffice_key);
-	}
-
-	/**
-	 * Validate backoffice key.
-	 */
-	public static function validate_backoffice_key(string $backoffice_key): bool {
-		$backoffice_key = sanitize_text_field($backoffice_key);
-
-		if ($backoffice_key === '') {
-			return false;
-		}
-
-		$url = add_query_arg(
-			[
-				'boKey' => $backoffice_key,
-			],
-			self::API_BASE . '/gateway/get'
-		);
-
-		try {
-			$data = self::request('GET', $url);
-
-			return !empty($data);
-		} catch (RuntimeException) {
-			return false;
-		}
 	}
 
 	/**
@@ -59,7 +32,6 @@ final class IfthenpayClient {
 
 	/**
 	 * Build a normalized method catalog from a raw API response.
-	 * Use this instead of get_method_catalog() when you already have the raw data.
 	 *
 	 * @param array<int, array<string, mixed>> $rawMethods
 	 * @return array<int, array<string, string>>
@@ -79,20 +51,6 @@ final class IfthenpayClient {
 			];
 		}
 		return $catalog;
-	}
-
-	/**
-	 * Get visible payment methods normalized into a consistent indexed catalog.
-	 * Makes one API call. Prefer build_method_catalog_from_raw() when you already hold the raw methods.
-	 *
-	 * @return array<int, array<string, string>>
-	 */
-	public static function get_method_catalog(): array {
-		try {
-			return self::build_method_catalog_from_raw( self::get_available_methods() );
-		} catch ( \Throwable ) {
-			return [];
-		}
 	}
 
 	/**
@@ -260,34 +218,43 @@ final class IfthenpayClient {
 	}
 
 	/**
-	 * Get gateway accounts.
+	 * Register a merchant-notification (webhook) callback URL for a gateway key.
+	 *
+	 * On success, ifthenpay will push an asynchronous GET request to $callback_url
+	 * whenever a payment created against $gateway_key resolves (paid/cancelled/failed),
+	 * independent of the customer's browser being present.
 	 */
-	public function get_gateway_accounts(string $gateway_key): array {
-		$url = add_query_arg(
-			[
-				'backofficekey' => $this->backoffice_key,
-				'gatewayKey'    => sanitize_text_field($gateway_key),
-			],
-			self::MOBILE_BASE . '/GetAccountsByGatewayKey'
-		);
+	public static function activate_callback(string $gateway_key, string $callback_url): bool {
+		$gateway_key  = sanitize_text_field($gateway_key);
+		$callback_url = esc_url_raw($callback_url);
 
-		return self::request('GET', $url);
-	}
+		if ($gateway_key === '' || $callback_url === '') {
+			return false;
+		}
 
-	/**
-	 * Get payment method by transaction ID.
-	 */
-	public static function get_payment_method_by_transaction_id(string $transaction_id): array {
-		//$transaction_id = 'HWG9lQsKJeLhjYzoCa8U';
+		$payload = [
+			'apKey' => base64_encode($gateway_key),
+			'chave' => $gateway_key,
+			'urlCb' => $callback_url,
+		];
 
-		$url = add_query_arg(
-			[
-				'transactionId' => $transaction_id,
-			],
-			self::API_BASE . '/gateway/transaction/status/get'
-		);
+		try {
+			$data = self::request(
+				'POST',
+				self::API_BASE . '/endpoint/callback/activation/?cms=wpforms',
+				[
+					'headers' => [
+						'Content-Type' => 'application/json',
+					],
+					'body' => wp_json_encode($payload),
+				],
+				15
+			);
+		} catch (RuntimeException) {
+			return false;
+		}
 
-		return self::request('GET', $url);
+		return isset($data['data']) && (string) $data['data'] === 'OK';
 	}
 
 	/**

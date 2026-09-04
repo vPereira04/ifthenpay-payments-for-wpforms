@@ -12,6 +12,11 @@ use Ifthenpay\WPForms\Admin\Settings;
 use Ifthenpay\WPForms\Builder\Field;
 use Ifthenpay\WPForms\Builder\Payments;
 use Ifthenpay\WPForms\Builder\Process;
+use Ifthenpay\WPForms\Cron\ExpiredPaymentsCron;
+use Ifthenpay\WPForms\Templates\ComplexFormTemplate;
+use Ifthenpay\WPForms\Templates\ExampleFormTemplate;
+use Ifthenpay\WPForms\Themes\IfthenpayDarkTheme;
+use Ifthenpay\WPForms\Themes\IfthenpayLightTheme;
 
 final class Plugin {
 
@@ -38,6 +43,8 @@ final class Plugin {
 	public function init(): void {
 		add_action( 'plugins_loaded', [ $this, 'init_components' ], 20 );
 		add_action( 'wpforms_loaded', [ $this, 'register_field' ] );
+		add_action( 'wpforms_loaded', [ $this, 'register_templates' ] );
+		add_action( 'wpforms_loaded', [ $this, 'register_theme' ] );
 		add_action( 'wp_enqueue_scripts', [ $this, 'enqueue_frontend_assets' ] );
 	}
 
@@ -53,12 +60,17 @@ final class Plugin {
 			return;
 		}
 
+		( new ExpiredPaymentsCron() )->boot();
+
 		if ( is_admin() ) {
 			new Settings();
 
-			if ( function_exists( 'wpforms_is_admin_page' ) && wpforms_is_admin_page( 'builder' ) ) {
-				$this->payments = new Payments( IFTP_PBL_GATEWAY_LABEL, IFTP_PBL_SLUG );
-			}
+			// Always instantiate (not gated to the builder page): the builder's
+			// save button POSTs to admin-ajax.php without a `page` param, so
+			// wpforms_is_admin_page( 'builder' ) is false on that request. Since
+			// wpforms_save_form_args (which triggers callback activation) is
+			// hooked from the constructor, gating this would silently skip it.
+			$this->payments = new Payments( IFTP_PBL_GATEWAY_LABEL, IFTP_PBL_SLUG );
 		}
 
 		add_action( 'wp_ajax_iftp_pbl_activate_payment_method', fn() => $this->get_payments()->ajax_activate_payment_method() );
@@ -69,8 +81,6 @@ final class Plugin {
 		add_action( 'wp_ajax_nopriv_iftp_pbl_create_pay_button_payment', [ $this->process, 'ajax_create_pay_button_payment' ] );
 		add_action( 'wp_ajax_iftp_pbl_verify_payment',                   [ $this->process, 'ajax_verify_payment' ] );
 		add_action( 'wp_ajax_nopriv_iftp_pbl_verify_payment',            [ $this->process, 'ajax_verify_payment' ] );
-		add_action( 'wp_ajax_iftp_pbl_cancel_payment',                   [ $this->process, 'ajax_cancel_payment' ] );
-		add_action( 'wp_ajax_nopriv_iftp_pbl_cancel_payment',            [ $this->process, 'ajax_cancel_payment' ] );
 	}
 
 	/**
@@ -83,6 +93,32 @@ final class Plugin {
 		}
 
 		new Field( IFTP_PBL_GATEWAY_LABEL, IFTP_PBL_FIELD_TYPE );
+	}
+
+	/**
+	 * Registers the ifthenpay form templates on the Add New Form screen.
+	 * @return void
+	 */
+	public function register_templates(): void {
+		if ( ! is_admin() || ! class_exists( '\WPForms_Template' ) ) {
+			return;
+		}
+
+		new ExampleFormTemplate();
+		new ComplexFormTemplate();
+	}
+
+	/**
+	 * Registers the "ifthenpay dark"/"ifthenpay light" presets in WPForms' Themes tab.
+	 * @return void
+	 */
+	public function register_theme(): void {
+		if ( ! is_admin() || ! function_exists( 'wpforms_upload_dir' ) ) {
+			return;
+		}
+
+		( new IfthenpayDarkTheme() )->boot();
+		( new IfthenpayLightTheme() )->boot();
 	}
 
 	/**
@@ -127,9 +163,15 @@ final class Plugin {
 				'processing_text'                 => __( 'Processing payment...', 'ifthenpay-payments-for-wpforms' ),
 				'warning_missing_amount'          => __( 'The payment total is not ready yet. Please review the form and try again.', 'ifthenpay-payments-for-wpforms' ),
 				'warning_config_title'            => __( 'Configuration Required', 'ifthenpay-payments-for-wpforms' ),
-				'warning_gateway_conflict_title'  => __( 'Heads up! Another payment gateway is currently active', 'ifthenpay-payments-for-wpforms' ),
-				'warning_gateway_conflict_message' => __( 'Another payment gateway is currently active on this form. The ifthenpay button is unavailable while that gateway is active.', 'ifthenpay-payments-for-wpforms' ),
 				'warning_payment_error_title'     => __( 'Unable to open payment', 'ifthenpay-payments-for-wpforms' ),
+				'cancelled_title'                 => __( 'Payment cancelled', 'ifthenpay-payments-for-wpforms' ),
+				'cancelled_message'               => __( 'You cancelled the payment.', 'ifthenpay-payments-for-wpforms' ),
+				'paid_title'                      => __( 'Payment received', 'ifthenpay-payments-for-wpforms' ),
+				'paid_message'                    => __( 'Your payment was successful. Thank you!', 'ifthenpay-payments-for-wpforms' ),
+				'pending_title'                   => __( 'Payment processing', 'ifthenpay-payments-for-wpforms' ),
+				'pending_message'                 => __( "We're waiting for your payment to be confirmed. You don't need to do anything else — this will update automatically once it's complete.", 'ifthenpay-payments-for-wpforms' ),
+				'failed_title'                    => __( 'Payment failed', 'ifthenpay-payments-for-wpforms' ),
+				'failed_message'                  => __( 'Your payment could not be completed.', 'ifthenpay-payments-for-wpforms' ),
 			]
 		);
 	}

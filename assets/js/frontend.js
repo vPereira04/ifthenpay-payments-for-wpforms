@@ -40,17 +40,23 @@
 		}
 	}
 
-	// Map of WPForms field CSS class fragment -> internal field type.
-	const FIELD_CLASS_TO_TYPE = [
-		['wpforms-field-email', 'email'],
-		['wpforms-field-name', 'name'],
-		['wpforms-field-payment-total', 'payment-total'],
-		['wpforms-field-payment-single', 'payment-single'],
-		['wpforms-field-payment-checkbox', 'payment-checkbox'],
-		['wpforms-field-payment-multiple', 'payment-multiple'],
-		['wpforms-field-payment-select', 'payment-select'],
-		['wpforms-field-payment-coupon', 'payment-coupon'],
-		['iftp-pbl-live-field', 'iftp_pbl_field'],
+	// Query params ifthenpay's hosted payment page can leave on the return URL: our own
+	// tracking params (see IfthenpayPayload::build_gateway_urls()) plus ifthenpay's own, which
+	// it appends regardless of whether our tracking params survive the round trip (they often
+	// don't). All of these must be scrubbed from the address bar once read — left in place,
+	// they get resubmitted with the next "Pay now" click since WPForms forms post back to the
+	// current URL, corrupting values like `amount` on that next attempt.
+	const RETURN_PARAM_KEYS = [
+		'wpforms_pay',
+		'iftp_payment_id',
+		'iftp_gateway',
+		'id',
+		'amount',
+		'requestId',
+		'sk',
+		'brand',
+		'pan',
+		'lang',
 	];
 
 	// Field types allowed alongside an ifthenpay field (do not count as competing gateways).
@@ -83,25 +89,14 @@
 		'wpforms-field-authorize',
 	];
 
-	function classifyFieldType(fieldClass) {
-		const match = FIELD_CLASS_TO_TYPE.find(
-			([cls]) => fieldClass.indexOf(cls) !== -1
-		);
-		return match ? match[1] : 'text';
-	}
-
 	class IfthenpayPaymentsForWpformsFront {
 		constructor() {
-			this.$modal = null;
 			this.$loadingOverlay = null;
 			this.allowProgrammaticSubmit = false;
 			this.activeButton = null;
-			this.activeModalToken = '';
 			this.activeForm = null;
-			this.paymentHandled = false;
 			this.paymentSessionActive = false;
 			this.scrollLockState = null;
-			this.modalTimer = null;
 			this.visibilityUpdateTimer = null;
 			this.activeRuntimeError = false;
 
@@ -131,55 +126,6 @@
 			return idMatch ? parseInt(idMatch[1], 10) || 0 : 0;
 		}
 
-		getFormConfig($form, gatewayKey) {
-			const formId = this.getFormId($form);
-			if (!formId) {
-				return null;
-			}
-
-			const fields = {};
-
-			$form.find('.wpforms-field').each(function (index) {
-				const $field = $(this);
-				const fieldId =
-					$field.data('field-id') ||
-					$field
-						.find('input, select, textarea')
-						.first()
-						.attr('data-field-id');
-				const fieldType = classifyFieldType(
-					String($field.attr('class') || '')
-				);
-				const label = $field
-					.find('label')
-					.first()
-					.text()
-					.replace(/\s*\*\s*$/, '')
-					.trim();
-
-				if (fieldId) {
-					fields[fieldId] = {
-						id: parseInt(fieldId, 10),
-						type: fieldType,
-						label: label || 'Field #' + (index + 1),
-					};
-				}
-			});
-
-			return {
-				id: formId,
-				fields,
-				payments: {
-					iftp_pbl: { enable: '1', gateway_key: gatewayKey || '' },
-				},
-				settings: {
-					form_title:
-						$form.find('h2.wpforms-title').text() ||
-						'Form ' + formId,
-				},
-			};
-		}
-
 		showRuntimeError($field, message) {
 			const text = String(message || '').trim();
 			if (!text || !$field || !$field.length) {
@@ -197,7 +143,234 @@
 			);
 		}
 
+		/**
+		 * Render the outcome of a payment attempt as a popup — used on return from ifthenpay's
+		 * hosted payment page (see handleGatewayReturn()). This is a modal appended to <body>
+		 * rather than inline markup on the field, because WPForms conditional logic can set the
+		 * field to display:none, which would hide inline content right when it's needed most (the
+		 * field the customer just paid on is often the one a later answer conditionally hides).
+		 * Every outcome is final as shown: "completed"/"cancelled"/"failed" just state what
+		 * happened (the pay button stays disabled) and "pending" explains a webhook will confirm
+		 * it later. There is no in-place retry — re-attempting a payment is a brand new
+		 * submission, so it goes through the normal form flow (a page reload) rather than
+		 * silently reusing this field's state.
+		 */
+		showOutcomeNotice(status) {
+			const copy = {
+				completed: {
+					title: this.getFrontendText('paid_title', 'Payment received'),
+					message: this.getFrontendText(
+						'paid_message',
+						'Your payment was successful. Thank you!'
+					),
+				},
+				pending: {
+					title: this.getFrontendText(
+						'pending_title',
+						'Payment processing'
+					),
+					message: this.getFrontendText(
+						'pending_message',
+						"We're waiting for your payment to be confirmed. You don't need to do anything else — this will update automatically once it's complete."
+					),
+				},
+				cancelled: {
+					title: this.getFrontendText('cancelled_title', 'Payment cancelled'),
+					message: this.getFrontendText(
+						'cancelled_message',
+						'You cancelled the payment.'
+					),
+				},
+				failed: {
+					title: this.getFrontendText('failed_title', 'Payment failed'),
+					message: this.getFrontendText(
+						'failed_message',
+						'Your payment could not be completed.'
+					),
+				},
+			};
+
+			const entry = copy[status] || copy.pending;
+
+			this.activeRuntimeError = true;
+
+			this.renderOutcomeModal(status, entry.title, entry.message);
+		}
+
+		/**
+		 * Lazily build the outcome popup's DOM (overlay + modal box) and wire its dismiss
+		 * handlers. Built once and reused across calls so repeated poll updates
+		 * (pollPaymentOutcome()) just swap its content rather than re-creating it.
+		 */
+		getOutcomeModalElements() {
+			if (this.$outcomeModalOverlay?.length) {
+				return this.$outcomeModalOverlay;
+			}
+
+			const $overlay = $(
+				'<div class="iftp-pbl-outcome-modal-overlay" role="presentation">'
+			);
+			const $modal = $(
+				'<div class="iftp-pbl-outcome-modal" role="dialog" aria-modal="true">'
+			);
+			const $close = $(
+				'<button type="button" class="iftp-pbl-outcome-modal-close" aria-label="Close">'
+			).html('&times;');
+			const $title = $('<p class="iftp-pbl-outcome-modal-title">');
+			const $message = $('<p class="iftp-pbl-outcome-modal-message">');
+
+			$modal.append($close, $title, $message);
+			$overlay.append($modal);
+			$('body').append($overlay);
+
+			$close.on('click', () => this.dismissOutcomeModal());
+			$overlay.on('click', (e) => {
+				if (e.target === $overlay.get(0)) {
+					this.dismissOutcomeModal();
+				}
+			});
+			$(document).on('keydown.iftpOutcomeModal', (e) => {
+				if (e.key === 'Escape' && $overlay.hasClass('iftp-pbl-is-open')) {
+					this.dismissOutcomeModal();
+				}
+			});
+
+			this.$outcomeModalOverlay = $overlay;
+			this.$outcomeModalBox = $modal;
+			this.$outcomeModalTitle = $title;
+			this.$outcomeModalMessage = $message;
+
+			return $overlay;
+		}
+
+		/**
+		 * Fill and (re)open the outcome popup. Called every time the outcome is known or
+		 * re-checked (initial "pending" on return, then again on each poll tick) — it always
+		 * shows, even if the customer already closed it once, since a status the customer
+		 * dismissed while it was "pending" must still be able to reappear once it resolves.
+		 */
+		renderOutcomeModal(status, title, message) {
+			this.getOutcomeModalElements();
+
+			this.$outcomeModalTitle.text(title);
+			this.$outcomeModalMessage.text(message);
+
+			if (this.appliedOutcomeStatusClass) {
+				this.$outcomeModalBox.removeClass(
+					this.appliedOutcomeStatusClass
+				);
+			}
+			this.appliedOutcomeStatusClass = 'iftp-pbl-outcome-' + status;
+			this.$outcomeModalBox.addClass(this.appliedOutcomeStatusClass);
+
+			this.$outcomeModalOverlay.addClass('iftp-pbl-is-open');
+			this.lockScroll();
+		}
+
+		dismissOutcomeModal() {
+			if (!this.$outcomeModalOverlay?.length) {
+				return;
+			}
+			this.$outcomeModalOverlay.removeClass('iftp-pbl-is-open');
+			this.unlockScroll();
+		}
+
+		/**
+		 * Detect a return visit from ifthenpay's hosted payment page (success/error/cancel_url,
+		 * see IfthenpayPayload::build_gateway_urls()) and resolve + display the real outcome.
+		 * There is no modal/iframe anymore — the customer's browser genuinely left the site and
+		 * came back, so this runs on a fresh page load, not inside a same-page interception.
+		 */
+		handleGatewayReturn() {
+			const status = getReturnStatusFromUrl(window.location.href);
+			if (!status) {
+				// No recognized wpforms_pay status, but ifthenpay may still have appended its own
+				// params (id, amount, requestId, sk, brand, pan, ...) on top of — or instead of —
+				// ours. Scrub those too so a stale amount/requestId can't bleed into the next
+				// "Pay now" attempt on this page.
+				if (
+					RETURN_PARAM_KEYS.some(
+						(key) => getUrlSearchParam(window.location.href, key) !== ''
+					)
+				) {
+					this.stripReturnParamsFromUrl();
+				}
+				return;
+			}
+
+			const paymentId = getUrlSearchParam(
+				window.location.href,
+				'iftp_payment_id'
+			);
+
+			this.stripReturnParamsFromUrl();
+
+			const $field = $('.iftp-pbl-live-field').first();
+			if (!$field.length || !paymentId) {
+				return;
+			}
+
+			const $button = $field.find('.iftp-pbl-pay-now-button').first();
+			$button.prop('disabled', true);
+
+			this.showOutcomeNotice('pending');
+			this.pollPaymentOutcome($field, $button, status, paymentId, 0);
+		}
+
+		/**
+		 * Poll ajax_verify_payment a handful of times while a payment stays "pending" after
+		 * return, so the pending message's "this will update automatically" is actually true for
+		 * the common case of a few extra seconds of processing, not just a manual-refresh promise.
+		 * Bounded on purpose — a reference that genuinely takes longer (Multibanco/Payshop, paid
+		 * hours or days later) is exactly what the webhook, independent of this page, resolves.
+		 *
+		 * A 'success' status here is only ever what the browser reported on return — it is never
+		 * itself proof of payment (see IfthenpayReturn::is_successful_pay_now_return()'s
+		 * docblock). ajax_verify_payment() only ever reports the payment's real, current status;
+		 * it never marks it "completed" from this call. Only ifthenpay's server-to-server
+		 * webhook (handle_webhook_success()) can ever move a payment to "completed".
+		 */
+		pollPaymentOutcome($field, $button, status, paymentId, attempt) {
+			const maxAttempts = 5;
+			const intervalMs = 8000;
+
+			this.verifyPaymentReturn(status, paymentId, (ok, data) => {
+				const finalStatus = String(
+					data.status || (ok ? 'completed' : 'pending')
+				);
+
+				this.showOutcomeNotice(finalStatus);
+				$button.prop('disabled', finalStatus === 'completed');
+
+				if (finalStatus === 'pending' && attempt < maxAttempts) {
+					window.setTimeout(
+						() =>
+							this.pollPaymentOutcome(
+								$field,
+								$button,
+								status,
+								paymentId,
+								attempt + 1
+							),
+						intervalMs
+					);
+				}
+			});
+		}
+
+		stripReturnParamsFromUrl() {
+			try {
+				const url = new URL(window.location.href);
+				RETURN_PARAM_KEYS.forEach((key) => url.searchParams.delete(key));
+				window.history.replaceState({}, document.title, url.toString());
+			} catch (e) {
+				// Cosmetic only — leaving the params in place is harmless.
+			}
+		}
+
 		init() {
+			this.handleGatewayReturn();
+
 			$(document).on('click', '.iftp-pbl-pay-now-button', (e) => {
 				e.preventDefault();
 				this.handlePayNowClick($(e.currentTarget));
@@ -269,25 +442,6 @@
 
 		getFrontendText(key, fallback) {
 			return cfg?.[key] ? String(cfg[key]) : fallback;
-		}
-
-		setReturnPayload($form, payload) {
-			if (!$form || !$form.length) {
-				return;
-			}
-			const data = payload || {};
-			$form
-				.find('.iftp-pbl-transaction-id-input')
-				.val(data.transaction_id || '')
-				.end()
-				.find('.iftp-pbl-payment-id-input')
-				.val(data.payment_id || '')
-				.end()
-				.find('.iftp-pbl-payment-session-input')
-				.val(data.modal_token || '')
-				.end()
-				.find('.iftp-pbl-paid-now-return-input')
-				.val(JSON.stringify(data));
 		}
 
 		getVisibilityState($element) {
@@ -477,7 +631,14 @@
 
 			$field
 				.toggleClass('iftp-pbl-is-active', fieldState.canUseIfthenpay)
-				.toggleClass('iftp-pbl-is-blocked', fieldState.isBlocked);
+				.toggleClass('iftp-pbl-is-blocked', fieldState.isBlocked)
+				// A competing gateway field being active on the form isn't a
+				// misconfiguration to explain to the visitor — just hide the whole
+				// ifthenpay field (box + button) rather than showing a warning.
+				.toggleClass(
+					'iftp-pbl-gateway-conflict',
+					fieldState.hasActiveCompetingGateway
+				);
 
 			this.renderWarning(
 				$field.find('.iftp-pbl-config-warning').first(),
@@ -487,21 +648,6 @@
 				),
 				[fieldState.disabledReason || 'This field is disabled.'],
 				!fieldState.isConfigReady
-			);
-
-			this.renderWarning(
-				$field.find('.iftp-pbl-conflict-warning').first(),
-				this.getFrontendText(
-					'warning_gateway_conflict_title',
-					'Heads up! Another payment gateway is currently active'
-				),
-				[
-					this.getFrontendText(
-						'warning_gateway_conflict_message',
-						'Another payment gateway is currently active on this form. The ifthenpay button is unavailable while that gateway is active.'
-					),
-				],
-				fieldState.isConfigReady && fieldState.hasActiveCompetingGateway
 			);
 
 			if ($button.length) {
@@ -559,11 +705,8 @@
 
 		_prepareHiddenInputs($form) {
 			$form
-				.find(
-					'.iftp-pbl-payment-id-input, .iftp-pbl-transaction-id-input, .iftp-pbl-payment-session-input, .iftp-pbl-paid-now-return-input'
-				)
+				.find('.iftp-pbl-payment-id-input, .iftp-pbl-paid-now-return-input')
 				.val('');
-			$form.find('.iftp-pbl-paid-now-clicked-input').val('1');
 		}
 
 		_disableButton($button) {
@@ -627,6 +770,8 @@
 			}
 
 			const $field = $button.closest('.iftp-pbl-live-field');
+			$field.find('.iftp-pbl-runtime-warning').first().empty().hide();
+			this.dismissOutcomeModal();
 
 			if (!this.formHasChosenPaymentAmount($form)) {
 				this.showRuntimeError(
@@ -660,7 +805,6 @@
 
 			this.activeButton = $button;
 			this.activeForm = $form;
-			this.paymentHandled = false;
 			this.paymentSessionActive = true;
 
 			this._disableButton($button);
@@ -672,23 +816,6 @@
 				form_id: formId,
 				gateway_key: gatewayKey,
 				form_payload: $form.serialize(),
-				form_data: JSON.stringify(this.getFormFieldData($form)),
-				form_config: JSON.stringify(
-					this.getFormConfig($form, gatewayKey)
-				),
-				clicked_pay_now: 1,
-				iftp_pbl_field_visible: $field.is(':visible') ? '1' : '0',
-				iftp_pbl_field_hidden_by_condition: $field.hasClass(
-					'wpforms-conditional-hide'
-				)
-					? '1'
-					: '0',
-				iftp_pbl_field_conditionally_shown:
-					fieldState.isConditionallyShown ? '1' : '0',
-				iftp_pbl_field_conditionally_hidden:
-					fieldState.isConditionallyHidden ? '1' : '0',
-				iftp_pbl_has_active_conflict:
-					fieldState.hasActiveCompetingGateway ? '1' : '0',
 			})
 				.done((response) => {
 					const data = response?.data ?? {};
@@ -711,15 +838,23 @@
 						return;
 					}
 
-					$form
-						.find('.iftp-pbl-payment-id-input')
-						.val(data.payment_id || '');
-					$form
-						.find('.iftp-pbl-payment-session-input')
-						.val(
-							data.payment_session_token || data.modal_token || ''
+					const redirectUrl = String(
+						data.iframe_url || data.redirect_url || ''
+					);
+					if (!redirectUrl) {
+						this.showRuntimeError(
+							$field,
+							'Unable to open payment. Please try again.'
 						);
-					this.openModal(data, $form);
+						this.resetButton();
+						this.closeOverlay();
+						return;
+					}
+
+					// Full-page redirect to ifthenpay's hosted payment page — no modal/iframe.
+					// The customer's browser leaves this page entirely; handleGatewayReturn()
+					// picks up when (and if) it comes back.
+					window.location.href = redirectUrl;
 				})
 				.fail((jqXHR) => {
 					this.showRuntimeError(
@@ -734,207 +869,10 @@
 				});
 		}
 
-		getFormFieldData($form) {
-			const fieldData = {};
-			$form.find('input, select, textarea').each(function () {
-				const $element = $(this);
-				const name = $element.attr('name');
-				const type = String($element.attr('type') || '');
-				if (!name || type === 'button' || type === 'submit') {
-					return;
-				}
-				fieldData[name] = $element.val();
-			});
-			return fieldData;
-		}
-
-		_buildModalHtml(iframeUrl) {
-			return [
-				'<div class="ifp-overlay" style="position:fixed;inset:0;background:rgba(15,23,42,.55);display:flex;z-index:2147483647;">',
-				'<div class="ifp-container" style="position:relative;width:100vw;height:100vh;background:#fff;overflow:hidden;display:flex;flex-direction:column;">',
-				'<div class="ifp-header" style="display:flex;align-items:center;gap:14px;padding:16px 24px;background:#fef3c7;border-bottom:1px solid #fcd34d;">',
-				'<div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.6);display:flex;align-items:center;justify-content:center;flex-shrink:0;">',
-				'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
-				'</div>',
-				'<div style="flex:1;min-width:0;">',
-				'<p style="margin:0;font-size:20px;font-weight:600;color:#92400e;line-height:1.4;">Payment in progress</p>',
-				'<p style="margin:2px 0 0;font-size:15px;font-weight: 500;color:#92400e;opacity:.85;line-height:1.4;">Closing this window will cancel the transaction.</p>',
-				'</div>',
-				'<button type="button" class="ifp-close" aria-label="Close" style="width:36px;height:36px;border:none;border-radius:50%;background:rgba(255,255,255,.5);cursor:pointer;display:flex;align-items:center;justify-content:center;color:#92400e;flex-shrink:0;transition:background .15s;" onmouseover="this.style.background=\'rgba(255,255,255,.8)\'" onmouseout="this.style.background=\'rgba(255,255,255,.5)\'">',
-				'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
-				'</button>',
-				'</div>',
-				'<iframe class="ifp-iframe" src="' +
-					iframeUrl +
-					'" allow="payment" frameborder="0" style="flex:1;border:none;width:100%;"></iframe>',
-				'</div>',
-				'</div>',
-			].join('');
-		}
-
-		openModal(data, $form) {
-			this.closeModal();
-			this.activeModalToken = String(data.modal_token || '');
-
-			const iframeUrl = String(
-				data.iframe_url || data.redirect_url || ''
-			);
-			if (!iframeUrl) {
-				this.resetButton();
-				this.closeOverlay();
-				return;
-			}
-
-			const $modal = $(this._buildModalHtml(iframeUrl)).appendTo('body');
-			this.$modal = $modal;
-
-			$modal.find('.ifp-close').on('click', () => {
-				const modalToken = this.activeModalToken;
-				this.closeModal();
-				this.resetButton();
-				this.closeOverlay();
-				this.cancelPayment(modalToken, () => window.location.reload());
-			});
-
-			$modal.find('.ifp-iframe').on('load', () => {
-				this.inspectPaymentFrame(
-					$modal.find('.ifp-iframe'),
-					$form,
-					data,
-					() => {
-						this.closeModal();
-						this.closeOverlay();
-					}
-				);
-			});
-
-			if (this.modalTimer) {
-				window.clearInterval(this.modalTimer);
-			}
-
-			this.modalTimer = window.setInterval(() => {
-				if (!this.$modal || !this.$modal.length) {
-					window.clearInterval(this.modalTimer);
-					this.modalTimer = null;
-					return;
-				}
-				const $iframe = this.$modal.find('.ifp-iframe');
-				if ($iframe.length) {
-					this.inspectPaymentFrame($iframe, $form, data, () =>
-						this.closeModal()
-					);
-				}
-			}, 500);
-		}
-
-		inspectPaymentFrame($iframe, $form, data, done) {
-			let href = '';
-			try {
-				href = $iframe.get(0).contentWindow.location.href;
-			} catch (e) {
-				return;
-			}
-			this.inspectReturnUrl(href, $form, done || function () {});
-		}
-
-		inspectReturnUrl(href, $form, done) {
-			const status = getReturnStatusFromUrl(href);
-			if (!status || this.paymentHandled) {
-				return false;
-			}
-
-			const transactionId = getUrlSearchParam(href, 'transaction_id');
-			const requestId = getUrlSearchParam(href, 'requestId');
-			const paymentId =
-				getUrlSearchParam(href, 'id') ||
-				String($form.find('.iftp-pbl-payment-id-input').val() || '');
-
-			const buildPayload = () => ({
-				wpforms_pay: status,
-				status,
-				id: paymentId,
-				payment_id: paymentId,
-				transaction_id: transactionId,
-				request_id: requestId,
-				modal_token: this.activeModalToken || '',
-				verified: false,
-			});
-
-			if (status === 'cancel' || status === 'error') {
-				const modalToken = this.activeModalToken || '';
-				const returnPayload = buildPayload();
-
-				this.paymentHandled = true;
-				this.setReturnPayload($form, returnPayload);
-				this.closeOverlay();
-				this.resetButton();
-				done?.();
-				this.cancelPayment(modalToken, () =>
-					this.submitPaidForm($form)
-				);
-
-				return true;
-			}
-
-			if (status === 'success' && (transactionId || requestId)) {
-				const returnPayload = buildPayload();
-
-				this.paymentHandled = true;
-				this.setReturnPayload($form, returnPayload);
-				done?.();
-
-				this.setButtonProcessing();
-				this.verifyPaymentReturn(
-					status,
-					paymentId,
-					transactionId,
-					requestId,
-					(ok, verifyData) => {
-						if (ok) {
-							returnPayload.verified = true;
-							returnPayload.status =
-								verifyData.status || 'completed';
-							returnPayload.payment_method =
-								verifyData.payment_method || '';
-							returnPayload.transaction_id =
-								verifyData.transaction_id ||
-								returnPayload.transaction_id ||
-								requestId;
-							this.setReturnPayload($form, returnPayload);
-							this.resetButton();
-							this.submitPaidForm($form);
-							this.closeOverlay();
-						} else {
-							returnPayload.status =
-								verifyData.status || 'failed';
-							returnPayload.payment_method =
-								verifyData.payment_method || '';
-							this.setReturnPayload($form, returnPayload);
-							this.closeOverlay();
-							this.resetButton();
-							this.submitPaidForm($form);
-						}
-					}
-				);
-
-				return true;
-			}
-
-			return false;
-		}
-
-		verifyPaymentReturn(
-			status,
-			paymentId,
-			transactionId,
-			requestId,
-			callback = () => {}
-		) {
+		verifyPaymentReturn(status, paymentId, callback = () => {}) {
 			apiPost('iftp_pbl_verify_payment', {
 				payment_id: paymentId,
 				return_action: status,
-				transaction_id: transactionId,
-				request_id: requestId,
 			})
 				.done((response) => {
 					const data = response?.data ?? {};
@@ -944,29 +882,6 @@
 					callback(ok, data);
 				})
 				.fail(() => callback(false, {}));
-		}
-
-		cancelPayment(modalToken, callback = () => {}) {
-			if (!modalToken) {
-				callback(false);
-				return;
-			}
-			apiPost('iftp_pbl_cancel_payment', {
-				modal_token: modalToken,
-			}).always(() => callback(true));
-		}
-
-		setButtonProcessing() {
-			if (this.activeButton?.length) {
-				this.activeButton
-					.text(
-						this.getFrontendText(
-							'processing_text',
-							'Processing payment...'
-						)
-					)
-					.prop('disabled', true);
-			}
 		}
 
 		submitPaidForm($form) {
@@ -992,19 +907,6 @@
 					}, 50);
 				}
 			}, 50);
-		}
-
-		closeModal() {
-			if (this.$modal?.length) {
-				this.$modal.remove();
-			}
-			this.$modal = null;
-			this.activeModalToken = '';
-
-			if (this.modalTimer) {
-				window.clearInterval(this.modalTimer);
-				this.modalTimer = null;
-			}
 		}
 
 		closeOverlay() {
@@ -1109,38 +1011,27 @@
 	}
 
 	/**
-	 * Walk up from the field element to the form (or body) and return the
-	 * first visible text element that we can sample for the theme colour.
+	 * For a single ifthenpay field block, check the payment box's own background
+	 * colour — the actual surface the logos are drawn against — and replace logo
+	 * src with the dark (white) version when that background is dark.
 	 *
-	 * @param {Element} fieldEl
-	 * @returns {Element|null}
-	 */
-	function findTextProbe(fieldEl) {
-		var ctx = fieldEl.parentElement;
-		while (ctx && ctx.tagName !== 'FORM' && ctx !== document.body) {
-			ctx = ctx.parentElement;
-		}
-		if (!ctx) { return null; }
-		return ctx.querySelector(
-			'.wpforms-field-label, label, .wpforms-title, h1, h2, h3, p'
-		);
-	}
-
-	/**
-	 * For a single ifthenpay field block, check the surrounding text colour
-	 * and replace logo src with the dark (white) version when text is light.
+	 * Previously this sampled the *text* colour of the nearest label/heading
+	 * anywhere in the form as a proxy for the theme; that probe could easily
+	 * find nothing (a form with no other visible labels) or an element whose
+	 * color doesn't represent this field's own background, silently skipping
+	 * the swap — e.g. a solid-black logo (Apple Pay) staying black on a dark
+	 * background and effectively disappearing. Reading the box's own
+	 * background is direct and can't miss.
 	 *
 	 * @param {Element} fieldEl
 	 */
 	function applyThemeAwareLogos(fieldEl) {
-		var probe = findTextProbe(fieldEl);
-		if (!probe) { return; }
-
-		var computedColor = window.getComputedStyle(probe).color;
+		var box           = fieldEl.querySelector('.iftp-pbl-public-box') || fieldEl;
+		var computedColor = window.getComputedStyle(box).backgroundColor;
 		var luminance     = colorLuminance(computedColor);
 
-		if (luminance > 0.5) {
-			// Light text → dark background → use white logos.
+		if (luminance < 0.5) {
+			// Dark background → use white/dark-mode logos.
 			var imgs = fieldEl.querySelectorAll('img[data-logo-dark]');
 			for (var i = 0; i < imgs.length; i++) {
 				var darkSrc = imgs[i].getAttribute('data-logo-dark');

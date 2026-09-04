@@ -1,10 +1,10 @@
 === ifthenpay | Payments for WPForms ===
 Contributors: ifthenpay
-Tags: ifthenpay, wpforms, payments, pay by link, gateway
+Tags: ifthenpay, wpforms, payments, ifthen, gateway
 Requires at least: 6.5
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 8.2
-Stable tag: 1.0.0
+Stable tag: 2.0.0
 License: GPLv3
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -29,7 +29,7 @@ All settings are managed within WPForms and your ifthenpay Backoffice. The plugi
 3. Automatic payment confirmation (fast access)
 4. Support for multiple payment methods (cards, wallets, transfers)
 5. Coupon and discount support via WPForms
-6. Modal or popup payment display modes
+6. Secure full-page redirect to ifthenpay's hosted payment page
 7. Real-time payment status in WPForms
 8. Multi-language support (EN, ES, FR, PT)
 9. Security-first approach (no card data stored)
@@ -56,10 +56,10 @@ No. This version supports only one-time payments via pay-by-link.
 No. The plugin does not store card numbers or full banking details. Only minimal references required for payment matching are stored.
 
 = Which payment methods are supported? =
-Any method enabled on your ifthenpay Gateway Key (e.g. Multibanco, MB WAY, Payshop, Credit Card, Cofidis, Google Pay, Apple Pay, Pix).
+Any method enabled on your ifthenpay Gateway Key (e.g. Multibanco, MB WAY, Payshop, Credit Card, Google Pay, Apple Pay, Pix).
 
 = How does the payment process work? =
-Customers submit a WPForm and are presented with a secure payment page (modal or popup). After completing payment, ifthenpay sends a callback to update the payment status automatically.
+Customers submit a WPForm and are redirected to a secure ifthenpay-hosted payment page. After completing payment, ifthenpay sends a callback to update the payment status automatically.
 
 = Can I use WPForms coupons? =
 Yes. WPForms coupon and total fields are fully supported and automatically processed.
@@ -68,13 +68,19 @@ Yes. WPForms coupon and total fields are fully supported and automatically proce
 The entry is marked as Failed. Customers can retry payment depending on your form setup.
 
 = Can I customize the payment experience? =
-Yes. You can configure display mode (modal/popup), button label, payment description, and styling via WPForms.
+Yes. You can configure button label, payment description, and styling via WPForms.
+
+= What happens if my form also has another payment gateway field (PayPal, Stripe, Square, Authorize.Net)? =
+WPForms only allows one active payment method per submission, so the ifthenpay field automatically hides itself (logo, methods, and "Pay now" button) while another gateway's field is visible on the form. It reappears automatically if that other field is hidden again, e.g. by conditional logic. Only PayPal, Stripe, Square, and Authorize.Net fields count as competing gateways; WPForms' own Total, Coupon, and payment item fields do not.
 
 = Is there a sandbox? =
 ifthenpay may provide test entities; if unavailable, use a low-value live test.
 
 = How secure is the integration? =
 All requests are encrypted over HTTPS; no sensitive card data is stored.
+
+= Does ifthenpay's addon for WPForms accept WEBHOOKS(Callbacks)? =
+Yes! ifthenpay's addon for WPForms from version 2.0.0 and future ones accepts webhook(callbacks).
 
 == External Services ==
 
@@ -87,31 +93,44 @@ This plugin integrates with the ifthenpay payment platform to process payments f
   - **What it is and what it is used for**: The ifthenpay Backoffice is the merchant dashboard used to manage integrations and payment configurations. The plugin uses the ifthenpay API to generate payment links and validate transactions.
   - **What data is sent and when**:
     - During setup: Backoffice Key and Gateway Key for authentication and configuration retrieval.
-    - During payment processing: Transaction ID, amount, description, enabled payment method accounts, success/error/cancel return URLs, language, and optionally the selected payment method, customer email, customer name, and form field data.
-    - During callbacks: Payment status, Transaction ID, and payment method.
+    - During payment processing: Order reference ID, amount, description, enabled payment method accounts, success/error/cancel return URLs, language, and optionally the selected payment method, customer email, customer name, and form field data.
+    - During webhook registration: the Gateway Key and this site's callback URL, so ifthenpay can notify the site directly when a payment resolves.
+    - During payment method activation requests: when an admin requests activation of a new payment method from WPForms → Settings → Payments, an email is sent to ifthenpay support (suporte@ifthenpay.com) containing the Backoffice Key, Gateway Key, the requested payment method, the admin's email address, site URL, site name, WordPress version, WPForms version, and plugin version.
+    - During callbacks: Payment status and payment method.
   - **End-User License Agreement (EULA)**: [EULA](https://ifthenpay.com/eula/)
   - **Privacy Policy**: [Privacy Policy](https://ifthenpay.com/politica-de-privacidade/)
 
 All network requests are performed server-side over HTTPS. Sensitive credentials are stored securely and are not publicly exposed. No raw card or bank details are stored.
 
 == Screenshots ==
-1. **(Admin Only) Backoffice Synchronization under WPForms Settings Payments**
-2. **(Admin Only) WPForms's admin page (Creation/Editing Form -> Payments)**
-3. **(Admin Only) Adding ifthenpay's Payment field to the selected form**
-4. **(Admin Only) ifthenpay's Payment field Basic configuration options**
-5. **(Admin Only) ifthenpay's Payment field Advanced configuration options**
-6. **(Customers Experience) Payment Gateway field display varies by WPForms settings**
-7. **(Customers Experience) Payment Modal Window**
+1. (Admin Only) Backoffice Synchronization under WPForms Settings Payments
+2. (Admin Only) WPForms's admin page (Creation/Editing Form -> Payments)
+3. (Admin Only) Adding ifthenpay's Payment field to the selected form
+4. (Customers Experience) Payment Gateway field display varies by WPForms settings
+5. (Customers Experience) ifthenpay's Secure Payment Page
+6. (Customers Experience) Payment Message (either paid, pending, cancelled or failed)
+7. (Admin Only) Payment Details
+8. (Admin Only) Payment Entries
 
 == Changelog ==
 
 = 1.0.0 =
 * Initial release: WPForms integration, ifthenpay payments, multi-method support, modal.
 
+= 2.0.0 =
+*Version 2.0.0: WPForms integration now has WEBHOOKS(CALLBACKS).
+*Security: payment completion is now confirmed exclusively via the verified webhook.
+*Removed unused transaction ID tracking and the legacy modal/popup payment display; payments now use a full-page redirect to ifthenpay's hosted page.
+*Fixed: the payment outcome popup no longer reopens on its own after being dismissed, e.g. when switching back to the browser tab, unless the payment status actually changed.
+*Changed: when another WPForms payment gateway field (PayPal, Stripe, Square, Authorize.Net) is active on the form, the ifthenpay field now hides itself instead of showing a warning message.
+
 == Upgrade Notice ==
 
 = 1.0.0 =
 Initial release. Review gateway settings payments before going live.
+
+= 2.0.0 =
+Update to Version 2.0.0 to utilize WEBHOOKS(CALLBACKS).
 
 == License ==
 This plugin is licensed under the GPLv3.

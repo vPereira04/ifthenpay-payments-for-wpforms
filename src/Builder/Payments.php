@@ -6,7 +6,7 @@ namespace Ifthenpay\WPForms\Builder;
 
 use Ifthenpay\WPForms\Admin\Settings;
 use Ifthenpay\WPForms\Api\IfthenpayClient;
-use Ifthenpay\WPForms\Api\IfthenpayEmailHelper;
+use Ifthenpay\WPForms\Mail\IfthenpayEmailHelper;
 use Ifthenpay\WPForms\Api\IfthenpayPayload;
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -21,6 +21,8 @@ class Payments
         'payment-single', 'payment-checkbox', 'payment-multiple',
         'payment-select', 'payment-coupon', 'payment-total',
     ];
+    // Apple Pay and Google Pay are wallet-triggered methods and can't be set as the default.
+    private const NON_DEFAULT_ELIGIBLE_ENTITIES = ['APPLE', 'GOOGLE'];
 
     /** @var array<string, mixed> */
     private array $formData;
@@ -60,7 +62,7 @@ class Payments
             return [];
         }
 
-        // phpcs:disable WordPress.Security.NonceVerification.Recommended, WordPress.Security.NonceVerification.Missing
+        // phpcs:disable WordPress.Security.NonceVerification.Recommended, WordPress.Security.NonceVerification.Missing -- read-only lookup of the form id being edited in the builder UI, not a state-changing request.
         $formId = isset($_GET['form_id']) ? absint(wp_unslash($_GET['form_id'])) : 0;
         if ($formId <= 0 && isset($_POST['form_id'])) {
             $formId = absint(wp_unslash($_POST['form_id']));
@@ -129,7 +131,7 @@ class Payments
         echo '</div></div>';
 
         echo '<div id="wpforms-panel-content-section-payment-' . esc_attr($this->slug) . '"' . ($hasField ? '' : ' class="wpforms-hidden"') . '>';
-        echo '<div class="wpforms-panel-content-section-payment">';
+        echo '<div class="wpforms-panel-content-section-payment">'; 
         echo '<h2 class="wpforms-panel-content-section-payment-subtitle">' . esc_html($this->name) . '</h2>';
 
         wpforms_panel_field(
@@ -163,10 +165,10 @@ class Payments
         }
 
         echo '<div id="iftp-pbl-config-wrapper" style="margin-top:16px;">';
-        // phpcs:disable WordPress.Security.EscapeOutput.OutputNotEscaped
+        // phpcs:disable WordPress.Security.EscapeOutput.OutputNotEscaped -- each render_*() method below already escapes its own dynamic values before returning the markup string.
         echo $this->render_gateway_selector($gatewayKey);
-        echo $this->render_methods_table($details, $methodsConfig, $gatewayKey);
-        echo $this->render_default_config($defaultMethod, $description, $details, $methodsConfig, $gatewayKey);
+        echo $this->render_methods_table($details, $methodsConfig, $gatewayKey, $defaultMethod);
+        echo $this->render_default_config($description);
         // phpcs:enable WordPress.Security.EscapeOutput.OutputNotEscaped
         echo '</div></div></div>';
     }
@@ -223,9 +225,6 @@ class Payments
     public function ajax_load_gateway_methods(): void
     {
         check_ajax_referer('iftp_pbl_load_gateway_methods', 'nonce');
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( __( 'Unauthorized.', 'ifthenpay-payments-for-wpforms' ), 403 );
-		}
 
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => __('You do not have permission to load ifthenpay gateway methods.', 'ifthenpay-payments-for-wpforms')], 403);
@@ -289,17 +288,14 @@ class Payments
 
         wp_send_json_success([
             'gateway_key'  => $gatewayKey,
-            'methods_html' => $this->render_methods_table($details, $methodsConfig, $gatewayKey),
-            'default_html' => $this->render_default_config($defaultMethod, $description, $details, $methodsConfig, $gatewayKey),
+            'methods_html' => $this->render_methods_table($details, $methodsConfig, $gatewayKey, $defaultMethod),
+            'default_html' => $this->render_default_config($description),
         ]);
     }
 
     public function ajax_activate_payment_method(): void
     {
         check_ajax_referer('iftp_pbl_activate_payment_method', 'nonce');
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( __( 'Unauthorized.', 'ifthenpay-payments-for-wpforms' ), 403 );
-		}
 
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => __('You do not have permission to activate payment methods.', 'ifthenpay-payments-for-wpforms')], 403);
@@ -336,7 +332,7 @@ class Payments
             'site_name' => get_bloginfo('name'),
             'wp_version' => get_bloginfo('version'),
             'wpforms_version' => defined('WPFORMS_VERSION') ? (string) WPFORMS_VERSION : '',
-            'plugin_version' => defined('IFTP_PBL_VERSION') ? (string) IFTP_PBL_VERSION : '1.0.0',
+            'plugin_version' => defined('IFTP_PBL_VERSION') ? (string) IFTP_PBL_VERSION : '2.0.0',
         ]);
 
         if ($sent) {
@@ -363,7 +359,7 @@ class Payments
         unset($data, $args);
 
         $formData = isset($postData['post_content']) && function_exists('wpforms_decode')
-            ? wpforms_decode((string) $postData['post_content'])
+            ? wpforms_decode(wp_unslash((string) $postData['post_content']))
             : [];
         $formData = is_array($formData) ? $formData : [];
 
@@ -395,6 +391,8 @@ class Payments
                 if ((string) ($existing['gateway_key'] ?? '') !== $newGatewayKey) {
                     delete_option($optionKey);
                 }
+
+                $this->activate_ifthenpay_callback($newGatewayKey);
             }
 
             if (!empty($this->availableMethods)) {
@@ -597,7 +595,7 @@ class Payments
      * @param array<string, mixed> $details
      * @param array<string, array<string, string>> $methodsConfig
      */
-    private function render_methods_table(array $details, array $methodsConfig, string $gatewayKey): string
+    private function render_methods_table(array $details, array $methodsConfig, string $gatewayKey, string $defaultMethod): string
     {
         $slug = esc_attr($this->slug);
         $gk = esc_attr($gatewayKey);
@@ -606,7 +604,8 @@ class Payments
             . '<div style="margin-bottom:8px;font-weight:600;font-size:13px;">' . esc_html__('Payment Methods', 'ifthenpay-payments-for-wpforms') . '</div>'
             . '<table class="iftp-pbl-methods-table" data-gateway-key="' . $gk . '">'
             . '<thead><tr>'
-            . '<th style="text-align:center;width:60px;">' . esc_html__('Enable', 'ifthenpay-payments-for-wpforms') . '</th>'
+            . '<th class="iftp-method-toggle-th">' . esc_html__('Enable', 'ifthenpay-payments-for-wpforms') . '</th>'
+            . '<th class="iftp-method-default-th">' . esc_html__('Default', 'ifthenpay-payments-for-wpforms') . '</th>'
             . '<th>' . esc_html__('Method', 'ifthenpay-payments-for-wpforms') . '</th>'
             . '<th style="text-align:center;width:100px;">' . esc_html__('Logo', 'ifthenpay-payments-for-wpforms') . '</th>'
             . '<th>' . esc_html__('Account', 'ifthenpay-payments-for-wpforms') . '</th>'
@@ -624,6 +623,13 @@ class Payments
             $inputId = 'iftp_pbl_method_' . $gatewayKey . '_' . $entity;
             $entityAttr = esc_attr($entity);
             $inputIdAttr = esc_attr($inputId);
+            $defaultInputId = 'iftp_pbl_default_' . $gatewayKey . '_' . $entity;
+            $defaultInputIdAttr = esc_attr($defaultInputId);
+            $isDefaultEligible = !in_array($entity, self::NON_DEFAULT_ELIGIBLE_ENTITIES, true);
+            $isDefault = $isDefaultEligible && $isActivated && $defaultMethod !== '' && $defaultMethod === $entity;
+            $defaultName = $gatewayKey !== ''
+                ? ' name="payments[' . $slug . '][gateway_methods][' . $gk . '][default_method]"'
+                : '';
 
             $html .= '<tr class="iftp-pbl-method-row' . ($hasAccount ? '' : ' is-missing-account') . '" data-entity="' . $entityAttr . '">'
                 . '<td class="iftp-method-toggle"><span class="wpforms-toggle-control">'
@@ -633,6 +639,15 @@ class Payments
                 . checked($isActivated, true, false) . disabled(!$hasAccount, true, false) . '>'
                 . '<label class="wpforms-toggle-control-icon" for="' . $inputIdAttr . '"></label>'
                 . '</span></td>'
+                . '<td class="iftp-method-default">'
+                . ($isDefaultEligible
+                    ? '<input type="radio" class="iftp-pbl-default-radio" id="' . $defaultInputIdAttr . '"' . $defaultName
+                        . ' value="' . $entityAttr . '" data-entity="' . $entityAttr . '"'
+                        . checked($isDefault, true, false) . disabled(!$isActivated, true, false) . '>'
+                        . '<label for="' . $defaultInputIdAttr . '" class="iftp-pbl-default-star' . ($isActivated ? '' : ' iftp-pbl-default-star--hidden') . '"'
+                        . ' title="' . esc_attr__('Set as default payment method', 'ifthenpay-payments-for-wpforms') . '">&#9733;</label>'
+                    : '')
+                . '</td>'
                 . '<td><strong>' . esc_html($methodName) . '</strong></td>'
                 . '<td class="iftp-method-logo-cell">'
                 . ($logoUrl !== '' ? '<img src="' . esc_url($logoUrl) . '" alt="' . esc_attr($methodName) . '" class="iftp-method-logo">' : '&mdash;')
@@ -706,43 +721,20 @@ class Payments
     }
 
     /**
-     * @param array<string, mixed> $gatewayDetails
-     * @param array<string, array<string, string>> $methodsConfig
+     * Renders the form-level description field. The default payment method is chosen
+     * via the star toggle inside the payment-methods table (see render_methods_table()),
+     * not here.
      */
-    private function render_default_config(string $defaultMethod, string $description, array $gatewayDetails, array $methodsConfig, string $gatewayKey): string
+    private function render_default_config(string $description): string
     {
         $slug = esc_attr($this->slug);
-        $selectName = $gatewayKey !== ''
-            ? ' name="payments[' . $slug . '][gateway_methods][' . esc_attr($gatewayKey) . '][default_method]"'
-            : '';
-        $selectDisabled = $gatewayKey === '' ? ' disabled="disabled"' : '';
 
-        $html = '<div id="iftp-pbl-global-config" style="margin-top:14px;">'
-            . '<div class="wpforms-panel-field-row" style="margin-top:10px;">'
-            . '<label for="iftp_pbl_default_method" style="display:block;margin-bottom:4px;">' . esc_html__('Default payment method', 'ifthenpay-payments-for-wpforms') . '</label>'
-            . '<select id="iftp_pbl_default_method"' . $selectName . $selectDisabled . ' style="min-width:240px;">'
-            . '<option value="" ' . selected($defaultMethod, '', false) . '>' . esc_html__('Default (Auto)', 'ifthenpay-payments-for-wpforms') . '</option>';
-
-        foreach ($this->availableMethods as $method) {
-            if (!is_array($method)) {
-                continue;
-            }
-            $entity = strtoupper((string) ($method['entity'] ?? ''));
-            if ($entity === '' || empty($methodsConfig[$entity]['enabled'])) {
-                continue;
-            }
-            $label = (string) ($method['label'] ?? $entity);
-            $html .= '<option value="' . esc_attr($entity) . '" ' . selected($defaultMethod, $entity, false) . '>' . esc_html($label) . '</option>';
-        }
-
-        $html .= '</select></div>'
+        return '<div id="iftp-pbl-global-config" style="margin-top:14px;">'
             . '<div class="wpforms-panel-field-row" style="margin-top:10px;">'
             . '<label for="iftp_pbl_description" style="display:block;margin-bottom:4px;">' . esc_html__('Default description', 'ifthenpay-payments-for-wpforms') . '</label>'
             . '<input type="text" id="iftp_pbl_description" name="payments[' . $slug . '][description]" value="' . esc_attr($description) . '" class="regular-text" style="min-width:320px;">'
             . '<p class="description">' . esc_html__('Shown to customers as the payment description.', 'ifthenpay-payments-for-wpforms') . '</p>'
             . '</div></div>';
-
-        return $html;
     }
 
     private function fetch_and_cache_api_data(): void
@@ -863,6 +855,45 @@ class Payments
     private function form_table_option_key(int $formId): string
     {
         return 'iftp_pbl_table_form_' . $formId;
+    }
+
+    /**
+     * Register ifthenpay's server-to-server payment notification webhook for a gateway key.
+     * Called unconditionally on every builder Save — the merchant may have just changed
+     * which payment methods are enabled, so this always re-registers rather than trusting
+     * a cached "already activated" flag from a previous save.
+     */
+    private function activate_ifthenpay_callback(string $gatewayKey): void
+    {
+        $gatewayKey = trim($gatewayKey);
+        if ($gatewayKey === '') {
+            return;
+        }
+
+        $callbackUrl   = IfthenpayPayload::build_gateway_urls(0, home_url('/'))['callback_url'];
+        $activationUrl = IfthenpayPayload::build_callback_activation_url($callbackUrl);
+        $statusKey     = $this->callback_status_option_key($gatewayKey);
+
+        try {
+            $activated = IfthenpayClient::activate_callback($gatewayKey, $activationUrl);
+        } catch (\Throwable) {
+            $activated = false;
+        }
+
+        update_option(
+            $statusKey,
+            [
+                'activated'    => $activated,
+                'callback_url' => $callbackUrl,
+                'checked_at'   => time(),
+            ],
+            false
+        );
+    }
+
+    private function callback_status_option_key(string $gatewayKey): string
+    {
+        return 'iftp_pbl_callback_status_' . md5($gatewayKey);
     }
 
     private function render_gateway_selector(string $gatewayKey): string

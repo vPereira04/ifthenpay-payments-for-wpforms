@@ -118,7 +118,7 @@ class Settings
 
         $settings['payments']['ifthenpay-connection-status'] = [
             'id'      => 'ifthenpay-connection-status',
-            'name'    => __('Connection', 'ifthenpay-payments-for-wpforms'),
+            'name'    => __('Connection Status', 'ifthenpay-payments-for-wpforms'),
             'content' => $this->connection_status_content(),
             'type'    => 'content',
         ];
@@ -128,7 +128,7 @@ class Settings
 
     public function enqueue_assets(): void
     {
-        wp_register_style('ifthenpay-wpforms-admin', false, [], defined('IFTP_PBL_VERSION') ? IFTP_PBL_VERSION : '1.0.0');
+        wp_register_style('ifthenpay-wpforms-admin', false, [], defined('IFTP_PBL_VERSION') ? IFTP_PBL_VERSION : '2.0.0');
         wp_enqueue_style('ifthenpay-wpforms-admin');
         wp_add_inline_style('ifthenpay-wpforms-admin', $this->inline_css());
 
@@ -140,9 +140,6 @@ class Settings
     public function ajax_connect_backoffice(): void
     {
         check_ajax_referer('iftp_pbl_settings_connection', 'nonce');
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( __( 'Unauthorized.', 'ifthenpay-payments-for-wpforms' ), 403 );
-		}
 
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => __('You do not have permission to connect ifthenpay.', 'ifthenpay-payments-for-wpforms')], 403);
@@ -189,9 +186,6 @@ class Settings
     public function ajax_disconnect_backoffice(): void
     {
         check_ajax_referer('iftp_pbl_settings_connection', 'nonce');
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( __( 'Unauthorized.', 'ifthenpay-payments-for-wpforms' ), 403 );
-		}
 
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => __('You do not have permission to disconnect ifthenpay.', 'ifthenpay-payments-for-wpforms')], 403);
@@ -235,39 +229,37 @@ class Settings
     {
         if (self::get_backoffice_key() !== '') {
             return $this->render_connection_status_card(
-                'connected',
-                __('Connected', 'ifthenpay-payments-for-wpforms'),
-                __('Backoffice Key connected. Gateway keys and methods are configured inside the form builder.', 'ifthenpay-payments-for-wpforms'),
-                true
+                true,
+                __('Connected. Gateway keys and methods are configured inside the form builder.', 'ifthenpay-payments-for-wpforms')
             );
         }
 
         return $this->render_connection_status_card(
-            'disconnected',
-            __('Disconnected', 'ifthenpay-payments-for-wpforms'),
-            __('Enter your Backoffice Key and click Connect to load your WPForms gateways.', 'ifthenpay-payments-for-wpforms'),
-            false
+            false,
+            __('Enter your Backoffice Key and click Connect to load your WPForms gateways.', 'ifthenpay-payments-for-wpforms')
         );
     }
 
-    private function render_connection_status_card(string $status, string $title, string $message, bool $showDisconnect): string
+    /**
+     * Mirrors the native connection status markup WPForms itself uses for Stripe/Square
+     * (`.wpforms-connected` + `.wpforms-success-icon`, plain `.desc` text while
+     * disconnected) instead of a custom colored badge, so this reads like a built-in
+     * WPForms payment addon rather than a third-party card.
+     */
+    private function render_connection_status_card(bool $isConnected, string $message): string
     {
-        $html  = '<div id="iftp-pbl-connection-status-card" class="iftp-settings-card is-' . esc_attr($status) . '">';
-        $html .= '<div class="iftp-settings-status-row">';
-        $html .= '<span class="iftp-status-pill is-' . esc_attr($status) . '">' . esc_html($title) . '</span>';
-        $html .= '</div>';
-        $html .= '<p class="iftp-settings-status-message">' . wp_kses($message, [
-            'a'      => ['href' => [], 'target' => [], 'rel' => []],
-            'strong' => [],
-            'br'     => [],
-        ]) . '</p>';
-        $html .= '<div class="iftp-settings-actions">';
-        $html .= $showDisconnect
+        $html = '<div id="iftp-pbl-connection-status-card">';
+
+        $html .= $isConnected
+            ? '<div class="wpforms-connected"><span class="wpforms-success-icon"></span><p>' . esc_html($message) . '</p></div>'
+            : '<p class="desc">' . esc_html($message) . '</p>';
+
+        $html .= '<p>';
+        $html .= $isConnected
             ? '<button type="button" id="iftp-pbl-disconnect-backoffice" class="wpforms-btn wpforms-btn-md wpforms-btn-light-grey">' . esc_html__('Disconnect', 'ifthenpay-payments-for-wpforms') . '</button>'
             : '<button type="button" id="iftp-pbl-connect-backoffice" class="wpforms-btn wpforms-btn-md wpforms-btn-orange">' . esc_html__('Connect', 'ifthenpay-payments-for-wpforms') . '</button>';
-        $html .= '<span class="iftp-settings-message" aria-live="polite"></span>';
-        $html .= '</div>';
-        $html .= '</div>';
+        $html .= ' <span class="iftp-settings-message" aria-live="polite"></span>';
+        $html .= '</p></div>';
 
         return $html;
     }
@@ -281,18 +273,9 @@ class Settings
     {
         return '
             .iftp-pbl-backoffice-key-field-hidden{display:none}
-            .iftp-settings-card.is-warning{background:#fffdf0;border-color:#f1d38b}
-            .iftp-settings-card.is-error{background:#fff5f4;border-color:#f0b8b4}
-            .iftp-settings-card p{margin:8px 0 0;color:#50575e}
-            .iftp-settings-card .iftp-settings-status-message{margin-bottom:22px}
-            .iftp-settings-status-row{display:flex;align-items:center;gap:10px;margin-bottom:4px}
-            .iftp-status-pill{display:inline-flex;align-items:center;border-radius:999px;font-size:12px;font-weight:700;line-height:1;padding:6px 11px}
-            .iftp-status-pill.is-connected{background:#edf7ed;color:#0f6b2f}
-            .iftp-status-pill.is-disconnected{background:#fff4e5;color:#8a4b00}
-            .iftp-status-pill.is-warning{background:#fff8db;color:#7a5a00}
-            .iftp-status-pill.is-error{background:#fdecea;color:#b42318}
-            .iftp-settings-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:16px;border-top:1px solid #f0f0f1}
-            .iftp-settings-message{font-size:12px;color:#646970;margin-left:2px}
+            #iftp-pbl-connection-status-card .wpforms-connected{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+            #iftp-pbl-connection-status-card .wpforms-connected p{margin:0}
+            .iftp-settings-message{font-size:12px;color:#646970;margin-left:6px}
             .iftp-settings-message.is-success{color:#0f6b2f}
             .iftp-settings-message.is-error{color:#b42318}
         ';

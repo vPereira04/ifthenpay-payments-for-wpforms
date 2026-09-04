@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 /**
  * Plugin Name: 		ifthenpay | Payments for WPForms
- * Plugin URI:        	https://ifthenpay.com
+ * Plugin URI:        	https://github.com/ifthenpay/ifthenpay-payments-for-wpforms
  * Description: 		ifthenpay Pay by Link integration for WPForms.
- * Version: 			1.0.0
- * Tested up to:        7.0
+ * Version: 			2.0.0
+ * Tested up to:        7.1
  * Requires at least: 	6.5
  * Requires PHP:        8.2
  * Author:              ifthenpay
@@ -22,7 +22,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'IFTP_PBL_VERSION', '1.0.0' );
+define( 'IFTP_PBL_VERSION', '2.0.0' );
 define( 'IFTP_PBL_FILE', __FILE__ );
 define( 'IFTP_PBL_DIR', plugin_dir_path( __FILE__ ) );
 define( 'IFTP_PBL_URL', plugin_dir_url( __FILE__ ) );
@@ -55,3 +55,10 @@ if ( file_exists( $ifthenpay_wpforms_autoload ) ) {
 require_once $ifthenpay_wpforms_dir . 'src/Plugin.php';
 
 \Ifthenpay\WPForms\Plugin::instance()->init();
+
+register_deactivation_hook(
+	__FILE__,
+	static function (): void {
+		\Ifthenpay\WPForms\Cron\ExpiredPaymentsCron::unschedule();
+	}
+);

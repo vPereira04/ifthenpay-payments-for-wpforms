@@ -16,21 +16,17 @@ final class IfthenpayReturn {
 	/**
 	 * Resolve the normalized payment return context.
 	 *
+	 * IMPORTANT: this context is derived entirely from client-supplied $_GET/$_POST return
+	 * params (see get_pay_now_return_data_from_request()) — its 'successful' flag is never
+	 * proof of payment. See is_successful_pay_now_return()'s docblock.
+	 *
 	 * @param array<string, mixed> $return_data
-	 * @param array<string, mixed> $fields
-	 * @return array{transaction_id: string, payment_method: string, successful: bool}
+	 * @return array{payment_method: string, successful: bool}
 	 */
-	public static function resolve_return_context( array $return_data, array $fields ): array {
-		$transaction_id = self::resolve_transaction_id( $return_data, $fields );
-
+	public static function resolve_return_context( array $return_data ): array {
 		$payment_method = sanitize_text_field( $return_data['PaymentMethod'] ?? '' );
 
-		if ( $payment_method === '' && $transaction_id !== '' ) {
-			$payment_method = self::payment_method_from_transaction_status( $transaction_id );
-		}
-
 		return [
-			'transaction_id' => $transaction_id,
 			'payment_method' => $payment_method,
 			'successful'     => self::is_successful_pay_now_return( $return_data ),
 		];
@@ -70,11 +66,6 @@ final class IfthenpayReturn {
 				$return_data['request_signature'] = $sk;
 			}
 
-			$val = self::sanitize_transaction_id( self::get_query_string( 'transactionId' ) );
-			if ( $val !== '' ) {
-				$return_data['transaction_id'] = $val;
-			}
-
 			$val = sanitize_text_field( self::get_query_string( 'PaymentMethod' ) );
 			if ( $val !== '' ) {
 				$return_data['payment_method'] = $val;
@@ -88,7 +79,15 @@ final class IfthenpayReturn {
 	}
 
 	/**
-	 * Determine whether a Pay By Link return is verified/successful.
+	 * Determine whether a Pay By Link return *reports itself* as successful.
+	 *
+	 * IMPORTANT: this reads $_GET/$_POST params from the customer's own browser return —
+	 * IfthenpayPayload::build_gateway_urls() builds success/error/cancel_url as a plain,
+	 * unsigned query string, so anyone can forge an identical return/POST. A TRUE result here
+	 * is therefore never proof that a payment actually happened; no caller may treat it as
+	 * authoritative for marking a payment "completed" or granting anything of value. The only
+	 * trustworthy confirmation is Process::handle_webhook_success(), which independently
+	 * verifies the payment server-to-server with ifthenpay's anti-phishing key and amount.
 	 *
 	 * @param array<string, mixed> $return_data
 	 */
@@ -120,7 +119,7 @@ final class IfthenpayReturn {
 	 * Decide whether WPForms should block submission for this Pay By Link return.
 	 *
 	 * @param array<string, mixed> $return_data
-	 * @param array{transaction_id?: string, payment_method?: string, successful?: bool} $context
+	 * @param array{payment_method?: string, successful?: bool} $context
 	 */
 	public static function should_block_pay_now_return( array $return_data, array $context ): bool {
 		if ( empty( $return_data ) ) {
@@ -134,10 +133,10 @@ final class IfthenpayReturn {
 		}
 
 		if ( in_array( $status, [ 'success', 'completed', 'paid', 'ok' ], true ) ) {
-			return empty( $context['successful'] ) || empty( $context['transaction_id'] ) || empty( $context['payment_method'] );
+			return empty( $context['successful'] ) || empty( $context['payment_method'] );
 		}
 
-		return empty( $context['transaction_id'] ) || empty( $context['payment_method'] );
+		return empty( $context['payment_method'] );
 	}
 
 	/**
@@ -157,80 +156,6 @@ final class IfthenpayReturn {
 		return '';
 	}
 
-	/**
-	 * Verify and read payment method for a transaction ID. FODACI
-	 */
-	public static function payment_method_from_transaction_status( string $transaction_id ): string {
-		$transaction_id = sanitize_text_field( trim( $transaction_id ) );
-		if ( $transaction_id === '' ) {
-			return '';
-		}
-
-		try {
-			$response = IfthenpayClient::get_payment_method_by_transaction_id( $transaction_id );
-			return is_array( $response ) ? self::extract_payment_method_from_result( $response ) : '';
-		} catch ( \RuntimeException ) {
-			return '';
-		}
-	}
-
-	/**
-	 * @param array<string, mixed> $return_data
-	 * @param array<string, mixed> $fields
-	 */
-	private static function resolve_transaction_id( array $return_data, array $fields ): string {
-		$transaction_id = self::get_return_transaction_id_from_payload( $return_data );
-		if ( $transaction_id !== '' ) {
-			return $transaction_id;
-		}
-
-		$transaction_id = self::extract_transaction_id( $fields );
-		if ( $transaction_id !== '' ) {
-			return $transaction_id;
-		}
-
-		return self::extract_transaction_id_from_request();
-	}
-
-	/**
-	 * @param array<string, mixed> $fields
-	 */
-	private static function extract_transaction_id( array $fields ): string {
-		foreach ( $fields as $field ) {
-			if ( ! is_array( $field ) ) {
-				continue;
-			}
-
-			$transaction_id = self::sanitize_transaction_id( sanitize_text_field( $field['transactionId'] ?? '' ) );
-			if ( $transaction_id !== '' ) {
-				return $transaction_id;
-			}
-		}
-
-		return '';
-	}
-
-	private static function extract_transaction_id_from_request(): string {
-		$value = self::sanitize_transaction_id( self::get_query_string( 'transactionId' ) );
-		if ( $value !== '' ) {
-			return $value;
-		}
-
-		$value = self::sanitize_transaction_id( self::get_post_string( 'transactionId' ) );
-		if ( $value !== '' ) {
-			return $value;
-		}
-
-		return '';
-	}
-
-	/**
-	 * @param array<string, mixed> $payload
-	 */
-	private static function get_return_transaction_id_from_payload( array $payload ): string {
-		return self::sanitize_transaction_id( sanitize_text_field( $payload['transactionId'] ?? '' ) );
-	}
-
 	private static function get_posted_value( string $key ): string {
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WPForms verifies its submission nonce upstream before this method is called.
 		if ( ! isset( $_POST[ $key ] ) || $_POST[ $key ] === '' ) {
@@ -244,42 +169,6 @@ final class IfthenpayReturn {
 	private static function get_query_string( string $key ): string {
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- payment gateway return URL; external service redirects cannot carry WP nonces.
 		return isset( $_GET[ $key ] ) ? sanitize_text_field( wp_unslash( (string) $_GET[ $key ] ) ) : '';
-	}
-
-	private static function get_post_string( string $key ): string {
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WPForms verifies its submission nonce upstream before this method is called.
-		return isset( $_POST[ $key ] ) ? sanitize_text_field( wp_unslash( (string) $_POST[ $key ] ) ) : '';
-	}
-
-	private static function sanitize_transaction_id( string $transaction_id ): string {
-		$transaction_id = sanitize_text_field( trim( $transaction_id ) );
-
-		if ( $transaction_id === '' || str_contains( $transaction_id, '[' ) ) {
-			return '';
-		}
-
-		return $transaction_id;
-	}
-
-	public static function extract_payment_method_from_result( array $result ): string {
-		$method = self::first_string_value( $result, self::PAYMENT_METHOD_KEYS );
-		if ( $method !== '' ) {
-			return $method;
-		}
-		// API may return an indexed list ([{...}]) — check the first element
-		if ( isset( $result[0] ) && is_array( $result[0] ) ) {
-			return self::first_string_value( $result[0], self::PAYMENT_METHOD_KEYS );
-		}
-		return '';
-	}
-
-	private static function first_string_value( array $data, array $keys ): string {
-		foreach ( $keys as $key ) {
-			if ( isset( $data[ $key ] ) && is_string( $data[ $key ] ) && $data[ $key ] !== '' ) {
-				return $data[ $key ];
-			}
-		}
-		return '';
 	}
 
 	private function __construct() {}
