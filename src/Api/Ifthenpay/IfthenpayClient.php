@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Ifthenpay\WPForms\Api;
+namespace Ifthenpay\WPForms\Api\Ifthenpay;
 
 if ( ! defined( 'ABSPATH' ) ) {
 	die( 'Are you sure?' );
