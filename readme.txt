@@ -4,7 +4,7 @@ Tags: ifthenpay, wpforms, payments, ifthen, gateway
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.2
-Stable tag: 2.0.1
+Stable tag: 2.0.2
 License: GPLv3
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -122,6 +122,9 @@ All network requests are performed server-side over HTTPS. Sensitive credentials
 8. (Admin Only) Payment Entries
 
 == Changelog ==
+= 2.0.2 =
+*Fixed: plugin version metadata (Stable tag, plugin header) was not bumped for the 2.0.1 release; this maintenance release corrects it and re-syncs the WordPress.org listing.*
+
 = 2.0.1 =
 *Fixed: Sanitization function bug on the callback url.*
 
@@ -144,6 +147,9 @@ All network requests are performed server-side over HTTPS. Sensitive credentials
 * Initial release: WPForms integration, ifthenpay payments, multi-method support, modal.
 
 == Upgrade Notice ==
+
+= 2.0.2 =
+Maintenance release correcting version metadata from 2.0.1. No functional changes.
 
 = 2.0.1 =
 This version fixes the callback url bug from version 2.0.0.

@@ -338,7 +338,7 @@ class Payments
             'site_name' => get_bloginfo('name'),
             'wp_version' => get_bloginfo('version'),
             'wpforms_version' => defined('WPFORMS_VERSION') ? (string) WPFORMS_VERSION : '',
-            'plugin_version' => defined('IFTP_PBL_VERSION') ? (string) IFTP_PBL_VERSION : '2.0.1',
+            'plugin_version' => (string) IFTP_PBL_VERSION,
         ]);
 
         if ($sent) {
